@@ -41,7 +41,7 @@ except Exception as e:
     groq_client = None
 
 # স্থায়ী অফিসিয়াল চ্যাট মডেল
-GROQ_ACTIVE_MODEL = "llama-3.1-8b-instant"
+GROQ_ACTIVE_MODEL = "openai/gpt-oss-120b"
 
 APPROVED_CHAT_USERS = {ADMIN_ID}
 APPROVED_CHANNELS = {PUBLIC_CHANNEL_ID} if PUBLIC_CHANNEL_ID else set()
