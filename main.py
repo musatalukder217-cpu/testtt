@@ -42,7 +42,6 @@ except Exception as e:
     logger.error(f"Groq Client Init Failed: {e}")
     groq_client = None
 
-# টেক্সট ও ভয়েসের জন্য সক্রিয় মডেলসমূহ
 GROQ_CHAT_MODEL = "openai/gpt-oss-120b"
 GROQ_VOICE_MODEL = "whisper-large-v3"
 
@@ -50,6 +49,7 @@ APPROVED_CHAT_USERS = {ADMIN_ID}
 APPROVED_CHANNELS = {PUBLIC_CHANNEL_ID} if PUBLIC_CHANNEL_ID else set()
 user_chat_histories = {}
 seen_news_ids = set()
+LATEST_NEWS_CACHE = []  # সর্বদা তাজা ব্রেকিং নিউজ মেমোরিতে ধরে রাখার জন্য
 
 WAITING_REJECT_TEXT = 1
 
@@ -60,41 +60,51 @@ RSS_FEEDS = [
 ]
 
 def get_channel_english_date_str() -> str:
-    """পাবলিক চ্যানেলের জন্য ইংরেজি তারিখ (যেমন: 22 September 2026)"""
+    """চ্যানেলের জন্য ইংরেজি তারিখ (যেমন: 22 September 2026)"""
     bd_tz = timezone(timedelta(hours=6))
     now = datetime.now(bd_tz)
     return now.strftime("%d %B %Y")
 
 def get_user_current_time_str() -> str:
-    """ব্যবহারকারীর জন্য সময় ও তারিখ"""
+    """ব্যবহারকারীর জন্য স্থানীয় সময় ও তারিখ"""
     bd_tz = timezone(timedelta(hours=6))
     now = datetime.now(bd_tz)
     return now.strftime("%d %B %Y, %I:%M %p")
 
 def format_clean_text(text: str) -> str:
-    """স্টারচিহ্ন মুক্ত টেক্সট"""
+    """অপ্রয়োজনীয় স্টারচিহ্ন ও মার্কডাউন দূর করা"""
     if not text:
         return ""
     return text.replace("**", "").replace("*", "").strip()
 
 def get_binance_live_price(query_text: str):
-    """যেকোনো কয়েনের লাইভ ডাটা স্বয়ংক্রিয়ভাবে খোঁজা"""
+    """ভয়েস বা টেক্সটের যেকোনো শব্দ থেকে সঠিক লাইভ ক্রিপ্টো প্রাইস বের করা"""
     try:
-        clean_q = query_text.upper().replace("/", "").replace("-", " ")
+        clean_q = query_text.upper().replace("/", " ").replace("-", " ")
         words = clean_q.split()
         target_symbol = None
 
-        for w in words:
-            if len(w) >= 2 and len(w) <= 10:
-                if w.endswith("USDT"):
-                    target_symbol = w
-                    break
-                elif w in ["BTC", "ETH", "SOL", "BNB", "XRP", "DOGE", "ADA", "AVAX", "SUI", "NEAR", "PEPE", "SHIB", "LINK", "DOT", "MATIC", "POL", "APT", "ARB", "OP", "FET", "RENDER", "WIF"]:
-                    target_symbol = f"{w}USDT"
-                    break
+        # বাংলা ও ইংলিশ শব্দের ডাইনামিক ম্যাপিং
+        if any(k in clean_q for k in ["BTC", "BITCOIN", "বিটকয়েন", "বিটকয়েনের", "বিটকয়েনর"]):
+            target_symbol = "BTCUSDT"
+        elif any(k in clean_q for k in ["ETH", "ETHEREUM", "ইথেরিয়াম", "ইথিরিয়াম"]):
+            target_symbol = "ETHUSDT"
+        elif any(k in clean_q for k in ["SOL", "SOLANA", "সোলেয়ানা", "সোলানা"]):
+            target_symbol = "SOLUSDT"
+        elif any(k in clean_q for k in ["BNB", "BINANCE COIN"]):
+            target_symbol = "BNBUSDT"
+        else:
+            for w in words:
+                if len(w) >= 2 and len(w) <= 10:
+                    if w.endswith("USDT"):
+                        target_symbol = w
+                        break
+                    elif w in ["XRP", "DOGE", "ADA", "AVAX", "SUI", "NEAR", "PEPE", "SHIB", "LINK", "DOT", "MATIC", "POL", "APT", "ARB", "OP", "FET", "RENDER", "WIF"]:
+                        target_symbol = f"{w}USDT"
+                        break
 
         if not target_symbol:
-            return ""
+            target_symbol = "BTCUSDT"  # কোনো নির্দিষ্ট কয়েন না পাওয়া গেলে ডিফল্ট বিটকয়েন মার্কেট চেক
 
         url = f"https://api.binance.com/api/v3/ticker/24hr?symbol={target_symbol}"
         res = requests.get(url, timeout=4).json()
@@ -103,13 +113,13 @@ def get_binance_live_price(query_text: str):
             high = float(res['highPrice'])
             low = float(res['lowPrice'])
             change = float(res['priceChangePercent'])
-            return f"\n[Live Binance Data: {target_symbol} | Price: \({price:,.4f} | 24h High:\){high:,.4f} | 24h Low: ${low:,.4f} | 24h Change: {change}%]\n"
+            return f"\n[Binance Live Market Verified Data: {target_symbol} | Real-Time Price: \({price:,.2f} | 24h High:\){high:,.2f} | 24h Low: ${low:,.2f} | 24h Change: {change}%]\n"
         return ""
     except Exception:
         return ""
 
 async def send_large_text_reply(update: Update, waiting_msg, full_text: str):
-    """টেলিগ্রাম লিমিট অনুযায়ী মেসেজ নিরাপদভাবে পাঠানো"""
+    """টেলিগ্রামের লিমিট অনুযায়ী বড় মেসেজ নিরাপদভাবে পাঠানো"""
     max_len = 3900
     if len(full_text) <= max_len:
         await waiting_msg.edit_text(full_text)
@@ -132,11 +142,11 @@ async def send_large_text_reply(update: Update, waiting_msg, full_text: str):
         await update.message.reply_text(part)
 
 # -----------------------------------------------------------------------------
-# এআই ফাংশনসমূহ (ভয়েস, বহুভাষিক ক্ষমতা ও এক্সচেঞ্জ ট্রেডিং গাইড)
+# এআই ফাংশনসমূহ (তাজা নিউজ ও রিয়েল-টাইম কনটেক্সট যুক্ত)
 # -----------------------------------------------------------------------------
 
 def transcribe_audio_file(audio_bytes: bytes) -> str:
-    """টেলিগ্রামের অডিও বা ভয়েসকে টেক্সটে রূপান্তর"""
+    """টেলিগ্রাম অডিওকে টেক্সটে রূপান্তর"""
     if not groq_client:
         return ""
     try:
@@ -195,33 +205,35 @@ def analyze_user_crypto_query(user_id: int, user_text: str):
     history = user_chat_histories.get(user_id, [])
     current_time_str = get_user_current_time_str()
 
+    # ক্যাশ থেকে একদম তাজা খবরের পয়েন্টার যুক্ত করা
+    recent_news_context = ""
+    if LATEST_NEWS_CACHE:
+        recent_news_context = "\n[LIVE BREAKING NEWS HAPPENING RIGHT NOW]:\n" + "\n".join(
+            [f"- {n['title']}: {n['summary'][:150]}..." for n in LATEST_NEWS_CACHE[:3]]
+        ) + "\n"
+
     system_instruction = (
-        f"You are the Master Crypto Intelligence, Trading Educator & Polyglot Technical Brain. Current Date/Time: {current_time_str}. "
-        "You possess encyclopedic knowledge across all crypto domains:\n"
-        "1. Trading & Exchanges Mastery: Step-by-step practical guides for Binance, Bybit, Bitget, KuCoin, MEXC, OKX, BingX, DEXs (Uniswap, Raydium, PancakeSwap). "
-        "You can clearly teach Spot Trading (Limit, Market, Stop-Limit, OCO), Futures/Perpetual Trading (Cross/Isolated Margin, Leverage management, Long/Short positions, Liquidation price calculation, Take-Profit/Stop-Loss setups, Funding Rates).\n"
-        "2. Comprehensive Token Knowledge: All TradingView coins, newly launched tokens, Layer 1/2, Memecoins, DeFi, AI tokens, and macro indices (TOTAL, TOTAL2, TOTAL3, BTC.D, USDT.D, OTHERS).\n"
-        "3. UNIVERSAL MULTILINGUAL & REGIONAL DIALECT CAPABILITY:\n"
-        "- CRITICAL: Automatically detect the EXACT language and regional dialect of the user's input, and reply in that EXACT same language/dialect! "
-        "If the user speaks in standard Bengali, reply in Bengali. If they speak in Sylheti, Chittagonian (চাটগাঁইয়া), Noakhali, Dhakaiya, or any Bangladeshi regional dialect, reply naturally in that dialect! "
-        "If they speak English, Hindi, Urdu, Arabic, Spanish, French, or any world language, reply in that exact language. "
-        "- If the user explicitly commands you to speak in a specific language (e.g. 'বাংলায় বলো', 'Speak in English', 'চাটগাঁইয়া ভাষায় কও'), strictly obey and switch immediately.\n"
-        "4. Tone & Length: Direct, accurate, concise, and to-the-point. Do NOT use markdown asterisks (**). "
-        "If a completely non-financial and non-crypto question is asked, reply in the user's language that you are strictly a crypto/trading specialist."
+        f"You are the Master Institutional Crypto Intelligence Brain. Current Real-Time Date: {current_time_str}. "
+        "CRITICAL TEMPORAL & REAL-TIME RULES:\n"
+        "1. Unless the user explicitly asks for historical events (e.g. '২০২৩/২০২৪ এর খবর বলো' or 'আগের ইতিহাস বলো'), you MUST ALWAYS treat the conversation as happening RIGHT NOW on the current live date. "
+        "2. Base all current price levels and support/resistance strictly on the provided [Binance Live Market Verified Data]. Never hallucinate outdated Bitcoin prices (such as $38,000) when the live market price is different. "
+        "3. When answering about recent news and future market direction, refer strictly to the provided [LIVE BREAKING NEWS HAPPENING RIGHT NOW] or macroeconomic developments of the current period. "
+        "4. Language & Dialect Matching: Automatically detect the exact language and regional dialect of the user (Bengali, Sylheti, Chittagonian, Noakhali, English, etc.) and reply in the EXACT same language and dialect. "
+        "5. Length & Tone: Concise, accurate, direct, and to-the-point. Do not produce verbose disclaimers or unnecessary historical text. No markdown asterisks (**)."
     )
 
     messages = [{"role": "system", "content": system_instruction}]
     for h in history[-3:]:
         messages.append({"role": h["role"], "content": h["text"]})
-    
-    current_content = f"{live_data}\nUser Input: {user_text}"
+
+    current_content = f"{live_data}\n{recent_news_context}\nUser Query: {user_text}"
     messages.append({"role": "user", "content": current_content})
 
     try:
         response = groq_client.chat.completions.create(
             model=GROQ_CHAT_MODEL,
             messages=messages,
-            temperature=0.3,
+            temperature=0.2,
             max_tokens=850
         )
         reply = format_clean_text(response.choices[0].message.content)
@@ -234,7 +246,7 @@ def analyze_user_crypto_query(user_id: int, user_text: str):
         return f"⚠️ Error: {str(e)[:120]}"
 
 # -----------------------------------------------------------------------------
-# অ্যাডমিন ও টেলিগ্রাম হ্যান্ডলার (টেক্সট ও ভয়েস সাপোর্ট)
+# অ্যাডমিন ও টেলিগ্রাম হ্যান্ডলার
 # -----------------------------------------------------------------------------
 
 async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -259,8 +271,8 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if user.id in APPROVED_CHAT_USERS:
         await update.message.reply_text(
-            f"স্বাগতম {user.first_name}! আমি আপনার সর্বজনীন ক্রিপ্টো, ট্রেডিং ও ভয়েস এআই।\n"
-            "যেকোনো ভাষায় লিখে বা সরাসরি ভয়েস মেসেজ পাঠিয়ে ক্রিপ্টো মার্কেট, স্পট/ফিউচার ট্রেডিং বা কয়েন নিয়ে প্রশ্ন করতে পারেন।"
+            f"স্বাগতম {user.first_name}! আমি আপনার লাইভ ক্রিপ্টো ইন্টেলিজেন্স এআই।\n"
+            "বর্তমান লাইভ মার্কেট রেট, ব্রেকিং নিউজ বা যেকোনো ক্রিপ্টো প্রশ্ন লিখে অথবা ভয়েস মেসেজে জানাতে পারেন।"
         )
     else:
         await update.message.reply_text("⛔ আপনি অনুমোদিত ইউজার নন। অ্যাডমিনের কাছে এক্সেস রিকোয়েস্ট পাঠানো হয়েছে।")
@@ -281,13 +293,12 @@ async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_T
         return
 
     user_query = update.message.text
-    waiting_msg = await update.message.reply_text("🔍 পর্যালোচনা করছি...")
+    waiting_msg = await update.message.reply_text("🔍 লাইভ ডাটা ও বর্তমান নিউজ পর্যালোচনা করছি...")
 
     reply_text = analyze_user_crypto_query(user.id, user_query)
     await send_large_text_reply(update, waiting_msg, reply_text)
 
 async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """টেলিগ্রামের ভয়েস মেসেজ প্রসেসিং"""
     user = update.effective_user
     if user.id not in APPROVED_CHAT_USERS:
         await update.message.reply_text("⛔ আপনার চ্যাট এক্সেস এখনো অনুমোদিত হয়নি।")
@@ -297,7 +308,7 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
     if not voice:
         return
 
-    waiting_msg = await update.message.reply_text("🎙️ ভয়েস শুনছি এবং বিশ্লেষণ করছি...")
+    waiting_msg = await update.message.reply_text("🎙️ ভয়েস শুনছি এবং বর্তমান মার্কেট যাচাই করছি...")
 
     try:
         tg_file = await context.bot.get_file(voice.file_id)
@@ -307,11 +318,11 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
 
         transcribed_text = transcribe_audio_file(audio_bytes)
         if not transcribed_text:
-            await waiting_msg.edit_text("⚠️ ভয়েস পরিষ্কারভাবে শোনা যায়নি। অনুগ্রহ করে আবার বলুন বা লিখে পাঠান।")
+            await waiting_msg.edit_text("⚠️ ভয়েস পরিষ্কারভাবে বোঝা যায়নি। অনুগ্রহ করে আবার বলুন।")
             return
 
         reply_text = analyze_user_crypto_query(user.id, transcribed_text)
-        final_reply = f"🗣️ আপনার কথা: \"{transcribed_text}\"\n\n{reply_text}"
+        final_reply = f"🗣️ আপনার প্রশ্ন: \"{transcribed_text}\"\n\n{reply_text}"
         await send_large_text_reply(update, waiting_msg, final_reply)
     except Exception as e:
         logger.error(f"Voice Handle Error: {e}")
@@ -403,12 +414,13 @@ async def receive_custom_leave_message(update: Update, context: ContextTypes.DEF
     return ConversationHandler.END
 
 # -----------------------------------------------------------------------------
-# ব্যাকগ্রাউন্ড স্ক্যানার (চ্যানেলে হেডলাইন বাংলায়, বাকি সব ১০০% ইংরেজিতে)
+# ব্যাকগ্রাউন্ড স্ক্যানার (লাইভ তাজা নিউজ পুল আপডেট ও সম্প্রচার)
 # -----------------------------------------------------------------------------
 
 async def background_market_scanner(app):
+    global LATEST_NEWS_CACHE
     await asyncio.sleep(5)
-    logger.info("Market scanner active. Monitoring feeds...")
+    logger.info("Market scanner active. Fetching initial updates...")
 
     initial_count = 0
     for feed_url in RSS_FEEDS:
@@ -425,6 +437,10 @@ async def background_market_scanner(app):
                     title = entry.title
                     summary = entry.get("summary", "")
                     link = entry.link
+
+                    # তাজা নিউজ মেমোরি ক্যাশে যুক্ত করা
+                    LATEST_NEWS_CACHE.insert(0, {"title": title, "summary": summary})
+                    LATEST_NEWS_CACHE = LATEST_NEWS_CACHE[:10]  # সেরা ১০টি তাজা নিউজ মেমোরিতে রাখা
 
                     analysis = analyze_crypto_news(title, summary)
                     if not analysis:
@@ -460,6 +476,7 @@ async def background_market_scanner(app):
         except Exception as e:
             logger.error(f"Feed error: {e}")
 
+    # ব্যাকগ্রাউন্ড নিয়মিত স্ক্যান লুপ
     while True:
         try:
             for feed_url in RSS_FEEDS:
@@ -471,6 +488,9 @@ async def background_market_scanner(app):
                         title = entry.title
                         summary = entry.get("summary", "")
                         link = entry.link
+
+                        LATEST_NEWS_CACHE.insert(0, {"title": title, "summary": summary})
+                        LATEST_NEWS_CACHE = LATEST_NEWS_CACHE[:10]
 
                         analysis = analyze_crypto_news(title, summary)
                         if not analysis:
@@ -533,7 +553,7 @@ def main():
     loop = asyncio.get_event_loop()
     loop.create_task(background_market_scanner(app))
 
-    logger.info("Bot running with Multilingual Voice & Complete Exchange Intelligence...")
+    logger.info("Bot running with Live News Cache & Current Date Enforcement...")
     app.run_polling()
 
 if __name__ == "__main__":
