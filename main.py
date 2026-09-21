@@ -56,25 +56,17 @@ RSS_FEEDS = [
     "https://decrypt.co/feed"
 ]
 
-def get_channel_date_str() -> str:
-    """চ্যানেলের জন্য শুধুমাত্র বাংলা তারিখ (কোনো টাইম ছাড়া)"""
+def get_channel_english_date_str() -> str:
+    """চ্যানেলের জন্য ১০০% খাঁটি ইংরেজি তারিখ (যেমন: 22 September 2026)"""
     bd_tz = timezone(timedelta(hours=6))
     now = datetime.now(bd_tz)
-    months_bn = [
-        "জানুয়ারি", "ফেব্রুয়ারি", "মার্চ", "এপ্রিল", "মে", "জুন",
-        "জুলাই", "আগস্ট", "সেপ্টেম্বর", "অক্টোবর", "নভেম্বর", "ডিসেম্বর"
-    ]
-    return f"{now.day} {months_bn[now.month - 1]} {now.year}"
+    return now.strftime("%d %B %Y")
 
 def get_user_current_time_str() -> str:
-    """ব্যবহারকারীর রিলেটিভ টাইম কনটেক্সট"""
+    """ব্যবহারকারীর জন্য বর্তমান সময় ও তারিখ"""
     bd_tz = timezone(timedelta(hours=6))
     now = datetime.now(bd_tz)
-    months_bn = [
-        "জানুয়ারি", "ফেব্রুয়ারি", "মার্চ", "এপ্রিল", "মে", "জুন",
-        "জুলাই", "আগস্ট", "সেপ্টেম্বর", "অক্টোবর", "নভেম্বর", "ডিসেম্বর"
-    ]
-    return f"{now.day} {months_bn[now.month - 1]} {now.year}, {now.strftime('%I:%M %p')}"
+    return now.strftime("%d %B %Y, %I:%M %p")
 
 def format_clean_text(text: str) -> str:
     """স্টারচিহ্ন এবং অপ্রয়োজনীয় মার্কডাউন দূর করা"""
@@ -83,17 +75,18 @@ def format_clean_text(text: str) -> str:
     return text.replace("**", "").replace("*", "").strip()
 
 def get_binance_live_price(symbol="BTCUSDT"):
-    """সরাসরি লাইভ মার্কেট ডাটা সংগ্রহ"""
+    """বাইন্যান্স থেকে যেকোনো কয়েনের লাইভ মার্কেট ডাটা সংগ্রহ"""
     try:
         url = f"https://api.binance.com/api/v3/ticker/24hr?symbol={symbol}"
         res = requests.get(url, timeout=5).json()
-        price = float(res['lastPrice'])
-        high = float(res['highPrice'])
-        low = float(res['lowPrice'])
-        change = float(res['priceChangePercent'])
-        return f"\n[Live Binance Data: {symbol} | Price: \({price:,.2f} | 24h High:\){high:,.2f} | 24h Low: ${low:,.2f} | 24h Change: {change}%]\n"
-    except Exception as e:
-        logger.warning(f"Binance fetch error: {e}")
+        if 'lastPrice' in res:
+            price = float(res['lastPrice'])
+            high = float(res['highPrice'])
+            low = float(res['lowPrice'])
+            change = float(res['priceChangePercent'])
+            return f"\n[Live Binance Data: {symbol} | Price: \({price:,.4f} | 24h High:\){high:,.4f} | 24h Low: ${low:,.4f} | 24h Change: {change}%]\n"
+        return ""
+    except Exception:
         return ""
 
 async def send_large_text_reply(update: Update, waiting_msg, full_text: str):
@@ -120,7 +113,7 @@ async def send_large_text_reply(update: Update, waiting_msg, full_text: str):
         await update.message.reply_text(part)
 
 # -----------------------------------------------------------------------------
-# এআই ফাংশনসমূহ (হেডলাইন বাংলায়, বাকি সব ইংরেজিতে ও পরিমিত ইমোজি)
+# এআই ফাংশনসমূহ (পূর্ণাঙ্গ ক্রিপ্টো জ্ঞান ও চ্যানেল ফরম্যাটিং)
 # -----------------------------------------------------------------------------
 
 def analyze_crypto_news(title: str, summary: str):
@@ -129,19 +122,17 @@ def analyze_crypto_news(title: str, summary: str):
 
     system_prompt = (
         "You are an institutional crypto market analyst. "
-        "Analyze the provided breaking news with genuine market intelligence. "
-        "Do NOT blindly label everything bullish or bearish; evaluate if it's routine noise or a catalyst.\n\n"
         "Strict Formatting Rules:\n"
-        "1. The Headline MUST be translated into a powerful, clear, and attractive BENGALI headline.\n"
-        "2. The rest of the content (Market Impact, Event Type, Potential Impact, and Executive Summary) MUST be written in professional ENGLISH.\n"
-        "3. Use clean, balanced emojis (not too many, strictly professional).\n"
-        "4. Do NOT use markdown asterisks (**).\n\n"
-        "Strict Output Template:\n"
-        "📢 [এখানে খবরের শিরোনামের স্পষ্ট বাংলা অনুবাদ]\n\n"
+        "1. ONLY the Headline line MUST be translated into a powerful, fluent, and attractive BENGALI headline.\n"
+        "2. ALL OTHER TEXT, labels, analysis, impact, and summary MUST be strictly in professional ENGLISH.\n"
+        "3. Evaluate if the news is a genuine catalyst or routine noise. Do NOT blindly label everything bullish/bearish.\n"
+        "4. Use clean, balanced emojis (🟢, 🔴, ⚪, ⚠️, 📊, 📝). Never use markdown asterisks (**).\n\n"
+        "Strict Output Format:\n"
+        "📢 [এখানে সংবাদের মূল শিরোনামের স্পষ্ট বাংলা অনুবাদ]\n\n"
         "📊 Market Impact: [Bullish 🟢 / Bearish 🔴 / Neutral ⚪ / High Volatility ⚠️]\n"
-        "📁 Event Type: [Single Major Event / Macro Update / Routine Cluster]\n"
-        "💡 Potential Outlook: [1-2 concise lines in English detailing price or market implication]\n"
-        "📝 Key Summary: [1 concise sentence in English summarizing the actual fact]"
+        "📁 Event Type: [Single Major Catalyst / Macro Regulatory / Routine Noise]\n"
+        "💡 Potential Outlook: [1-2 concise lines in English detailing price or liquidity implications]\n"
+        "📝 Key Summary: [1 concise sentence in English summarizing the core verified event]"
     )
     user_prompt = f"Original Title: {title}\nOriginal Summary: {summary}"
 
@@ -164,27 +155,40 @@ def analyze_user_crypto_query(user_id: int, user_text: str):
     if not groq_client:
         return "⚠️ এআই ত্রুটি: GROQ_API_KEY সেট করা হয়নি।"
 
+    # জনপ্রিয় কয়েনসমূহের ডাইনামিক লাইভ প্রাইস ডিটেকশন
     live_data = ""
     upper_query = user_text.upper()
-    if any(k in upper_query for k in ["BTC", "BITCOIN"]) or "বিটকয়েন" in user_text:
-        live_data = get_binance_live_price("BTCUSDT")
-    elif any(k in upper_query for k in ["ETH", "ETHEREUM"]) or "ইথেরিয়াম" in user_text:
-        live_data = get_binance_live_price("ETHUSDT")
-    elif any(k in upper_query for k in ["SOL", "SOLANA"]):
-        live_data = get_binance_live_price("SOLUSDT")
+    common_tickers = [
+        "BTC", "ETH", "SOL", "BNB", "XRP", "ADA", "AVAX", "DOGE", "SUI", "NEAR",
+        "LINK", "PEPE", "SHIB", "DOT", "MATIC", "POL", "LTC", "APT", "ARB", "OP", "FET"
+    ]
+    for ticker in common_tickers:
+        if ticker in upper_query:
+            live_data = get_binance_live_price(f"{ticker}USDT")
+            break
 
     history = user_chat_histories.get(user_id, [])
     current_time_str = get_user_current_time_str()
 
     system_instruction = (
-        f"You are a personal AI Crypto Analyst. Current Local Date/Time: {current_time_str}. "
-        "Answer the user's specific crypto questions in Bengali. "
-        "CRITICAL INSTRUCTION FOR LENGTH: Keep your answer direct, precise, and to-the-point! "
-        "Do NOT write excessive essays, lengthy disclaimers, or unrequested historical background. "
-        "Answer ONLY what the user specifically asked (e.g., if asked for support/resistance, directly give the key levels and a 1-line reason based on live data). "
-        "Use the provided live Binance market data for precision. "
-        "Do NOT use markdown asterisks (**). Maintain a natural, expert Bengali tone. "
-        "If unrelated questions are asked, strictly reply: 'দুঃখিত, আমি শুধুমাত্র ক্রিপ্টোকারেন্সি ও মার্কেট সম্পর্কিত বিষয় বিশ্লেষণে সক্ষম।'"
+        f"You are the Ultimate Crypto Intelligence Brain and Senior Technical Analyst. Current Date/Time: {current_time_str}. "
+        "You have complete and encyclopedic knowledge of the entire cryptocurrency industry, TradingView charts, and financial markets:\n"
+        "1. TradingView Macro Indices: "
+        "- TOTAL (Total crypto market cap), TOTAL2 (Total market cap excluding BTC), TOTAL3 (Altcoin market cap excluding BTC & ETH), "
+        "- BTC.D (Bitcoin dominance), USDT.D (Tether dominance), OTHERS (Mid/micro-cap altcoins index). "
+        "When user asks about TOTAL3 or Altcoins support/market cap, directly analyze the current billion-dollar support/resistance zones, liquidity rotation from BTC to Altcoins, and whether an Altseason setup is forming.\n"
+        "2. Coins & Categories: "
+        "- Layer 1s (BTC, ETH, SOL, BNB, SUI, AVAX, NEAR, ADA)\n"
+        "- Layer 2s & Rollups (ARB, OP, MATIC/POL, BASE ecosystem)\n"
+        "- Memecoins (DOGE, SHIB, PEPE, WIF, FLOKI, BONK)\n"
+        "- AI Tokens (NEAR, FET/ASI, RENDER), DeFi (UNI, AAVE, MKR), and RWA (ONDO).\n"
+        "3. Market Mechanics: Orderbook liquidity, Whales on-chain wallet tracking, Funding Rates, Long/Short liquidation heatmaps, Tokenomics (Unlocks/Vesting), Spot/Perpetual futures, and Fed Macroeconomic rate cuts (FOMC/CPI).\n\n"
+        "CRITICAL RULES:\n"
+        "- Never say you don't know any crypto concept, pair, or index. You understand all crypto terminology.\n"
+        "- Keep answers direct, concise, and to-the-point in natural professional Bengali. Answer ONLY what was asked without unnecessary long essays.\n"
+        "- Do NOT use markdown asterisks (**).\n"
+        "- If live Binance price data is provided, use it for exact realistic support and resistance numbers.\n"
+        "- If a completely non-financial, non-crypto question is asked, strictly reply: 'দুঃখিত, আমি শুধুমাত্র ক্রিপ্টোকারেন্সি ও মার্কেট সম্পর্কিত বিষয় বিশ্লেষণে সক্ষম।'"
     )
 
     messages = [{"role": "system", "content": system_instruction}]
@@ -199,7 +203,7 @@ def analyze_user_crypto_query(user_id: int, user_text: str):
             model=GROQ_ACTIVE_MODEL,
             messages=messages,
             temperature=0.3,
-            max_tokens=600  # অতিরিক্ত বড় উত্তর ঠেকিয়ে টু-দ্য-পয়েন্ট রাখার জন্য সীমিত
+            max_tokens=650
         )
         reply = format_clean_text(response.choices[0].message.content)
         history.append({"role": "user", "text": user_text})
@@ -219,16 +223,16 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⛔ আপনি বটের মূল অ্যাডমিন নন।")
         return
 
-    users_list = "\n".join([f"• {u}" for u in APPROVED_CHAT_USERS]) or "কোনো ইউজার নেই"
-    channels_list = "\n".join([f"• {c}" for c in APPROVED_CHANNELS if c]) or "কোনো চ্যানেল নেই"
+    users_list = "\n".join([f"• {u}" for u in APPROVED_CHAT_USERS]) or "None"
+    channels_list = "\n".join([f"• {c}" for c in APPROVED_CHANNELS if c]) or "None"
     current_time_str = get_user_current_time_str()
 
     panel_text = (
         "👑 Admin Control Dashboard\n"
-        f"📅 তারিখ: {current_time_str}\n"
+        f"📅 Date: {current_time_str}\n"
         "━━━━━━━━━━━━━━━━━━\n\n"
-        f"👥 অনুমোদিত ইউজার তালিকা:\n{users_list}\n\n"
-        f"📢 অনুমোদিত চ্যানেল তালিকা:\n{channels_list}"
+        f"👥 Approved Users:\n{users_list}\n\n"
+        f"📢 Approved Channels:\n{channels_list}"
     )
     await update.message.reply_text(panel_text)
 
@@ -236,8 +240,8 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if user.id in APPROVED_CHAT_USERS:
         await update.message.reply_text(
-            f"স্বাগতম {user.first_name}! আমি আপনার ক্রিপ্টো ইন্টেলিজেন্স এআই।\n"
-            "মার্কেট সাপোর্ট, রেজিস্ট্যান্স বা বর্তমান অবস্থা নিয়ে যেকোনো নির্দিষ্ট প্রশ্ন করতে পারেন।"
+            f"স্বাগতম {user.first_name}! আমি আপনার সর্বজনীন ক্রিপ্টো ও ট্রেডিং ইন্টেলিজেন্স এআই।\n"
+            "TOTAL3, বিটকয়েন ডমিন্যান্স, অল্টকয়েন সাপোর্ট-রেজিস্ট্যান্স বা যেকোনো কয়েন নিয়ে প্রশ্ন করতে পারেন।"
         )
     else:
         await update.message.reply_text("⛔ আপনি অনুমোদিত ইউজার নন। অ্যাডমিনের কাছে এক্সেস রিকোয়েস্ট পাঠানো হয়েছে।")
@@ -258,7 +262,7 @@ async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_T
         return
 
     user_query = update.message.text
-    waiting_msg = await update.message.reply_text("🔍 তথ্য পর্যালোচনা করছি...")
+    waiting_msg = await update.message.reply_text("🔍 ক্রিপ্টো মেট্রিক্স পর্যালোচনা করছি...")
 
     reply_text = analyze_user_crypto_query(user.id, user_query)
     await send_large_text_reply(update, waiting_msg, reply_text)
@@ -281,9 +285,9 @@ async def handle_bot_channel_add(update: Update, context: ContextTypes.DEFAULT_T
                 chat_id=ADMIN_ID,
                 text=(
                     f"📢 New Channel Alert!\n"
-                    f"চ্যানেল: {chat.title} (ID: {chat.id})\n"
-                    f"অ্যাড করেছে: @{added_by.username} (ID: {added_by.id})\n\n"
-                    "অনুমোদন দিতে চান?"
+                    f"Channel: {chat.title} (ID: {chat.id})\n"
+                    f"Added By: @{added_by.username} (ID: {added_by.id})\n\n"
+                    "Approve this channel for broadcasts?"
                 ),
                 reply_markup=InlineKeyboardMarkup(keyboard)
             )
@@ -296,25 +300,25 @@ async def handle_button_actions(update: Update, context: ContextTypes.DEFAULT_TY
     if data.startswith("user_allow_"):
         uid = int(data.split("_")[2])
         APPROVED_CHAT_USERS.add(uid)
-        await query.edit_message_text(f"✅ ইউজার {uid} সফলভাবে অনুমোদিত।")
+        await query.edit_message_text(f"✅ User {uid} approved.")
         try:
-            await context.bot.send_message(chat_id=uid, text="🎉 অ্যাডমিন আপনার রিকোয়েস্ট অনুমোদন করেছেন!")
+            await context.bot.send_message(chat_id=uid, text="🎉 অ্যাডমিন আপনার চ্যাট রিকোয়েস্ট অনুমোদন করেছেন!")
         except Exception:
             pass
 
     elif data.startswith("user_deny_"):
         uid = int(data.split("_")[2])
-        await query.edit_message_text(f"❌ ইউজার {uid} এর রিকোয়েস্ট বাতিল করা হয়েছে।")
+        await query.edit_message_text(f"❌ User {uid} denied.")
 
     elif data.startswith("chnl_approve_"):
         cid = int(data.split("_")[2])
         APPROVED_CHANNELS.add(cid)
-        await query.edit_message_text(f"✅ চ্যানেল {cid} অনুমোদিত হয়েছে (সাইলেন্টলি সক্রিয়)।")
+        await query.edit_message_text(f"✅ Channel {cid} approved (silently active).")
 
     elif data.startswith("chnl_reject_"):
         cid = int(data.split("_")[2])
         context.user_data['target_channel_to_leave'] = cid
-        await query.edit_message_text("❌ চ্যানেল বাতিল। বিদায় নেওয়ার আগে চ্যানেলে কী মেসেজ পাঠাতে চান তা লিখে পাঠান:")
+        await query.edit_message_text("❌ Channel rejected. Enter custom leave message:")
         return WAITING_REJECT_TEXT
 
     return ConversationHandler.END
@@ -340,21 +344,21 @@ async def receive_custom_leave_message(update: Update, context: ContextTypes.DEF
 
         try:
             await context.bot.leave_chat(chat_id=target_channel_id)
-            await update.message.reply_text("🚀 মেসেজ পোস্ট করে বট চ্যানেল থেকে বের হয়ে গেছে!")
+            await update.message.reply_text("🚀 Bot has left the channel.")
         except Exception as e:
-            await update.message.reply_text(f"⚠️ বের হতে সমস্যা: {e}")
+            await update.message.reply_text(f"⚠️ Error leaving: {e}")
 
         context.user_data.pop('target_channel_to_leave', None)
 
     return ConversationHandler.END
 
 # -----------------------------------------------------------------------------
-# ব্যাকগ্রাউন্ড স্ক্যানার (চ্যানেলে বাংলা হেডলাইন, ইংরেজি বিশ্লেষণ ও শুধু তারিখ)
+# ব্যাকগ্রাউন্ড স্ক্যানার (চ্যানেলে হেডলাইন বাংলায়, বাকি সব ১০০% ইংরেজিতে)
 # -----------------------------------------------------------------------------
 
 async def background_market_scanner(app):
     await asyncio.sleep(5)
-    logger.info("Market scanner active. Fetching initial updates...")
+    logger.info("Market scanner active. Monitoring feeds...")
 
     initial_count = 0
     for feed_url in RSS_FEEDS:
@@ -377,13 +381,12 @@ async def background_market_scanner(app):
                         analysis = (
                             f"📢 {title}\n\n"
                             f"📊 Market Impact: Neutral ⚪\n"
-                            f"📁 Event Type: Routine Update\n"
-                            f"💡 Potential Outlook: Market monitoring ongoing.\n"
-                            f"📝 Key Summary: Breaking crypto news reported."
+                            f"📁 Event Type: Routine News\n"
+                            f"💡 Potential Outlook: Market stability expected.\n"
+                            f"📝 Key Summary: General crypto sector update."
                         )
 
-                    # চ্যানেলে কোনো সময় থাকবে না, শুধু বাংলা তারিখ
-                    channel_date = get_channel_date_str()
+                    channel_date = get_channel_english_date_str()
                     broadcast_text = (
                         f"📰 Breaking News Update\n"
                         f"📅 {channel_date}\n\n"
@@ -407,7 +410,6 @@ async def background_market_scanner(app):
         except Exception as e:
             logger.error(f"Feed error: {e}")
 
-    # নিয়মিত ৫ মিনিট অন্তর মনিটরিং
     while True:
         try:
             for feed_url in RSS_FEEDS:
@@ -425,12 +427,12 @@ async def background_market_scanner(app):
                             analysis = (
                                 f"📢 {title}\n\n"
                                 f"📊 Market Impact: Neutral ⚪\n"
-                                f"📁 Event Type: Routine Update\n"
-                                f"💡 Potential Outlook: Market monitoring ongoing.\n"
-                                f"📝 Key Summary: Breaking crypto news reported."
+                                f"📁 Event Type: Routine News\n"
+                                f"💡 Potential Outlook: Market stability expected.\n"
+                                f"📝 Key Summary: General crypto sector update."
                             )
 
-                        channel_date = get_channel_date_str()
+                        channel_date = get_channel_english_date_str()
                         broadcast_text = (
                             f"📰 Breaking News Update\n"
                             f"📅 {channel_date}\n\n"
@@ -456,7 +458,7 @@ async def background_market_scanner(app):
         await asyncio.sleep(300)
 
 # -----------------------------------------------------------------------------
-# মেইন অ্যাপ
+# মেইন অ্যাপ রানার
 # -----------------------------------------------------------------------------
 
 def main():
@@ -480,7 +482,7 @@ def main():
     loop = asyncio.get_event_loop()
     loop.create_task(background_market_scanner(app))
 
-    logger.info("Bot is active with Bengali Headline & English Analysis...")
+    logger.info("Bot is active with Complete Institutional Crypto Brain...")
     app.run_polling()
 
 if __name__ == "__main__":
