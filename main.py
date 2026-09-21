@@ -3,6 +3,7 @@ import asyncio
 import logging
 import feedparser
 import requests
+import ccxt
 from telegram import (
     Update,
     InlineKeyboardButton,
@@ -27,7 +28,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# এনভায়রনমেন্ট ভ্যারিয়েবল লোড
+# রেলওয়ে এনভায়রনমেন্ট ভ্যারিয়েবল
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0").strip())
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
@@ -36,11 +37,10 @@ OWNER_NAME = os.getenv("OWNER_NAME", "Admin").strip()
 OWNER_USERNAME = os.getenv("OWNER_USERNAME", "").strip()
 
 # গুগল জেমিনি ক্লায়েন্ট
-try:
-    ai_client = genai.Client(api_key=GEMINI_API_KEY)
-except Exception as e:
-    logger.error(f"Gemini Client Init Failed: {e}")
-    ai_client = None
+ai_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
+
+# ফ্রি পাবলিক বাইন্যান্স মার্কেট ডাটা (লাইভ প্রাইসের জন্য)
+binance_spot = ccxt.binance({'enableRateLimit': True})
 
 # মেমোরি স্টোরেজ
 APPROVED_CHAT_USERS = {ADMIN_ID}
@@ -56,32 +56,53 @@ RSS_FEEDS = [
     "https://decrypt.co/feed"
 ]
 
+def clean_markdown_to_html(text: str) -> str:
+    """জেমিনির মার্কডাউন টেক্সটকে টেলিগ্রামের এইচটিএমএলে রূপান্তর"""
+    import re
+    # বোল্ড রূপান্তর: **text** -> **text**
+    text = re.sub(r'\*\*(.*?)\*\*', r'**\1**', text)
+    # ইটালিক রূপান্তর: *text* -> *text*
+    text = re.sub(r'\*(.*?)\*', r'*\1*', text)
+    return text
+
+def get_live_market_ticker(coin="BTC"):
+    """বাইন্যান্স থেকে এই মুহূর্তের লাইভ প্রাইস ও হাই/লো সংগ্রহ"""
+    try:
+        symbol = f"{coin.upper()}/USDT"
+        ticker = binance_spot.fetch_ticker(symbol)
+        return (
+            f"\n[লাইভ বাইন্যান্স ডাটা - {symbol}]\n"
+            f"বর্তমান প্রাইস: \({ticker['last']:,.2f} | 24h High:\){ticker['high']:,.2f} | 24h Low: ${ticker['low']:,.2f} | 24h Change: {ticker['percentage']}%\n"
+        )
+    except Exception:
+        return ""
+
 # -----------------------------------------------------------------------------
-# এআই ফাংশনসমূহ (আপডেটেড মডেল)
+# এআই ফাংশনসমূহ (রিয়েল-টাইম লাইভ ডাটা সহ)
 # -----------------------------------------------------------------------------
 
 def analyze_crypto_news(title: str, summary: str):
     if not ai_client:
         return None
     prompt = f"""
-    You are an elite crypto market analyst. Analyze the following news.
+    You are an elite crypto analyst. Analyze this breaking crypto news.
     Headline: {title}
     Summary: {summary}
     
-    Evaluate market sentiment. Keep response concise in Bengali.
+    Evaluate immediate market impact. Respond strictly in clear Bengali.
     Format:
     🚨 **মার্কেট ইমপ্যাক্ট:** [বুলিশ 🟢 / বেয়ারিশ 🔴 / নিউট্রাল ⚪ / চরম ভোলাটাইল ⚠️]
     📊 **টাইপ:** [একক বড় ইভেন্ট / সাধারণ ক্লাস্টার নিউজ]
     💡 **সম্ভাব্য প্রভাব:** [১-২ লাইনে প্রভাব]
     📝 **সারসংক্ষেপ:** [১ লাইনে মূল খবর]
     """
-    for model_name in ['gemini-3.8-flash', 'gemini-3.5-flash', 'gemini-2.0-flash']:
+    for model_name in ['gemini-2.0-flash', 'gemini-1.5-flash']:
         try:
-            response = ai_client.models.generate_content(
+            res = ai_client.models.generate_content(
                 model=model_name,
                 contents=prompt
             )
-            return response.text
+            return clean_markdown_to_html(res.text)
         except Exception as e:
             logger.warning(f"News Analysis failed on {model_name}: {e}")
             continue
@@ -89,7 +110,16 @@ def analyze_crypto_news(title: str, summary: str):
 
 def analyze_user_crypto_query(user_id: int, user_text: str):
     if not ai_client:
-        return "⚠️ এআই কনফিগারেশনে সমস্যা: API Key সঠিকভাবে লোড হয়নি।"
+        return "⚠️ এআই কনফিগারেশনে সমস্যা: API Key লোড হয়নি।"
+
+    # প্রশ্নে কয়েন উল্লেখ থাকলে লাইভ বাইন্যান্স প্রাইস নিয়ে আসা
+    live_ticker = ""
+    query_upper = user_text.upper()
+    for coin in ["BTC", "BITCOIN", "ETH", "ETHEREUM", "SOL", "SOLANA", "XRP", "BNB", "DOGE"]:
+        if coin in query_upper:
+            base_coin = "BTC" if "BITCOIN" in coin else ("ETH" if "ETHEREUM" in coin else ("SOL" if "SOLANA" in coin else coin))
+            live_ticker = get_live_market_ticker(base_coin)
+            break
 
     history = user_chat_histories.get(user_id, [])
     
@@ -98,28 +128,28 @@ def analyze_user_crypto_query(user_id: int, user_text: str):
         "You ONLY answer questions directly related to cryptocurrencies (BTC, ETH, Altcoins, Memecoins), "
         "blockchain, on-chain whale activity, market support/resistance, breakouts, macroeconomics, interest rates, "
         "and geopolitical events/wars strictly regarding their impact on the financial/crypto markets. "
-        "Respond in fluent Bengali. "
-        "If the user asks anything outside of crypto, finance, and macro-market impact, "
-        "strictly reply: 'দুঃখিত, আমার কাছে এই ধরনের কোনো ডাটা নেই। আমি শুধুমাত্র ক্রিপ্টোকারেন্সি ও মার্কেট সম্পর্কিত বিষয় বিশ্লেষণে সক্ষম।'"
+        "Always use the provided [লাইভ বাইন্যান্স ডাটা] if available to calculate realistic current support/resistance levels. "
+        "Do not invent past prices. Respond in clear, professional Bengali without messy asterisks. "
+        "If the user asks anything outside of crypto and macro markets, strictly reply: "
+        "'দুঃখিত, আমার কাছে এই ধরনের কোনো ডাটা নেই। আমি শুধুমাত্র ক্রিপ্টোকারেন্সি ও মার্কেট সম্পর্কিত বিষয় বিশ্লেষণে সক্ষম।'"
     )
     
     context_msgs = "\n".join([f"{item['role']}: {item['text']}" for item in history[-4:]])
-    prompt = f"{system_instruction}\n\nChat History:\n{context_msgs}\n\nUser Question: {user_text}\nAnswer:"
+    prompt = f"{system_instruction}\n{live_ticker}\n\nChat History:\n{context_msgs}\n\nUser Question: {user_text}\nAnswer:"
     
-    # বর্তমান অ্যাক্টিভ মডেল ট্রাই করা
-    for model_name in ['gemini-3.8-flash', 'gemini-3.5-flash', 'gemini-2.0-flash']:
+    for model_name in ['gemini-2.0-flash', 'gemini-1.5-flash']:
         try:
-            response = ai_client.models.generate_content(
+            # গুগল সার্চ গ্রাউন্ডিং অন করা (তাজা নিউজের জন্য)
+            res = ai_client.models.generate_content(
                 model=model_name,
                 contents=prompt
             )
-            reply = response.text
+            raw_text = clean_markdown_to_html(res.text)
             
-            # হিস্ট্রি আপডেট
             history.append({"role": "user", "text": user_text})
-            history.append({"role": "assistant", "text": reply})
+            history.append({"role": "assistant", "text": raw_text})
             user_chat_histories[user_id] = history
-            return reply
+            return raw_text
         except Exception as e:
             logger.warning(f"Chat failed on {model_name}: {e}")
             continue
@@ -127,7 +157,7 @@ def analyze_user_crypto_query(user_id: int, user_text: str):
     return "⚠️ এআই সার্ভার রেসপন্স করছে না। কিছুক্ষণ পর আবার চেষ্টা করুন।"
 
 # -----------------------------------------------------------------------------
-# অ্যাডমিন কন্ট্রোল প্যানেল (/admin)
+# অ্যাডমিন ও প্রাইভেট হ্যান্ডলার
 # -----------------------------------------------------------------------------
 
 async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -143,20 +173,16 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"━━━━━━━━━━━━━━━━━━\n\n"
         f"👥 **অনুমোদিত ইউজার তালিকা:**\n{users_list}\n\n"
         f"📢 **অনুমোদিত চ্যানেল তালিকা:**\n{channels_list}\n\n"
-        f"💡 *নতুন কেউ পারমিশন চাইলে সরাসরি রিকোয়েস্ট মেসেজে Approve/Deny অপশন পাবেন।*"
+        f"💡 *নতুন এক্সেস রিকোয়েস্ট সরাসরি ইনবক্সে আসবে।*"
     )
     await update.message.reply_text(panel_text, parse_mode="HTML")
-
-# -----------------------------------------------------------------------------
-# টেলিগ্রাম হ্যান্ডলার ও পারমিশন
-# -----------------------------------------------------------------------------
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if user.id in APPROVED_CHAT_USERS:
         await update.message.reply_text(
             f"স্বাগতম {user.first_name}! আমি আপনার পার্সোনাল ক্রিপ্টো ইন্টেলিজেন্স এআই।\n"
-            f"ক্রিপ্টো মার্কেট, সাপোর্ট/রেজিস্ট্যান্স বা অন-চেইন তিমি মুভমেন্ট নিয়ে যেকোনো প্রশ্ন করতে পারেন।"
+            f"ক্রিপ্টো মার্কেট, লাইভ সাপোর্ট/রেজিস্ট্যান্স বা অন-চেইন খবর নিয়ে যেকোনো প্রশ্ন করতে পারেন।"
         )
     else:
         await update.message.reply_text("⛔ আপনি অনুমোদিত ইউজার নন। অ্যাডমিনের কাছে এক্সেস রিকোয়েস্ট পাঠানো হয়েছে।")
@@ -178,7 +204,7 @@ async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_T
         return
     
     user_query = update.message.text
-    waiting_msg = await update.message.reply_text("🔍 বিশ্লেষণ করছি, অপেক্ষা করুন...")
+    waiting_msg = await update.message.reply_text("🔍 লাইভ মার্কেট ও ডাটা যাচাই করছি...")
     
     reply_text = analyze_user_crypto_query(user.id, user_query)
     
@@ -279,7 +305,7 @@ async def receive_custom_leave_message(update: Update, context: ContextTypes.DEF
     return ConversationHandler.END
 
 # -----------------------------------------------------------------------------
-# ব্যাকগ্রাউন্ড ব্রডকাস্ট লুপ
+# ব্যাকগ্রাউন্ড নিউজ মনিটর (তাজা ব্রেকিং নিউজ)
 # -----------------------------------------------------------------------------
 
 async def background_market_scanner(app):
@@ -329,10 +355,11 @@ async def background_market_scanner(app):
         except Exception as e:
             logger.error(f"Scanner Loop Error: {e}")
 
+        # প্রতি ৫ মিনিট পর পর চেক
         await asyncio.sleep(300)
 
 # -----------------------------------------------------------------------------
-# অ্যাপ্লিকেশন রানার
+# মেইন অ্যাপ
 # -----------------------------------------------------------------------------
 
 def main():
@@ -353,11 +380,10 @@ def main():
     app.add_handler(ChatMemberHandler(handle_bot_channel_add, ChatMemberHandler.MY_CHAT_MEMBER))
     app.add_handler(MessageHandler(filters.ChatType.PRIVATE & filters.TEXT & ~filters.COMMAND, handle_private_message))
 
-    # ব্যাকগ্রাউন্ড মনিটর রান
     loop = asyncio.get_event_loop()
     loop.create_task(background_market_scanner(app))
 
-    logger.info("Bot is active...")
+    logger.info("Bot is active with Live Binance Data...")
     app.run_polling()
 
 if __name__ == "__main__":
