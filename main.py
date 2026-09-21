@@ -20,14 +20,14 @@ from telegram.ext import (
 )
 from google import genai
 
-# লগিং সেটআপ (রেলওয়ের Logs ট্যাবে এরর দেখার জন্য)
+# লগিং কনফিগারেশন
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-# এনভায়রনমেন্ট ভ্যারিয়েবল
+# এনভায়রনমেন্ট ভ্যারিয়েবল লোড
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0").strip())
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
@@ -57,7 +57,7 @@ RSS_FEEDS = [
 ]
 
 # -----------------------------------------------------------------------------
-# এআই ফাংশনসমূহ
+# এআই ফাংশনসমূহ (আপডেটেড মডেল)
 # -----------------------------------------------------------------------------
 
 def analyze_crypto_news(title: str, summary: str):
@@ -75,20 +75,21 @@ def analyze_crypto_news(title: str, summary: str):
     💡 **সম্ভাব্য প্রভাব:** [১-২ লাইনে প্রভাব]
     📝 **সারসংক্ষেপ:** [১ লাইনে মূল খবর]
     """
-    try:
-        # gemini-2.5-flash বা fallback হিসেবে 1.5-flash
-        response = ai_client.models.generate_content(
-            model='gemini-2.5-flash',
-            contents=prompt
-        )
-        return response.text
-    except Exception as e:
-        logger.error(f"News Analysis Error: {e}")
-        return None
+    for model_name in ['gemini-3.8-flash', 'gemini-3.5-flash', 'gemini-2.0-flash']:
+        try:
+            response = ai_client.models.generate_content(
+                model=model_name,
+                contents=prompt
+            )
+            return response.text
+        except Exception as e:
+            logger.warning(f"News Analysis failed on {model_name}: {e}")
+            continue
+    return None
 
 def analyze_user_crypto_query(user_id: int, user_text: str):
     if not ai_client:
-        return "⚠️ এআই কনফিগারেশনে সমস্যা: API Key লোড হয়নি।"
+        return "⚠️ এআই কনফিগারেশনে সমস্যা: API Key সঠিকভাবে লোড হয়নি।"
 
     history = user_chat_histories.get(user_id, [])
     
@@ -105,33 +106,31 @@ def analyze_user_crypto_query(user_id: int, user_text: str):
     context_msgs = "\n".join([f"{item['role']}: {item['text']}" for item in history[-4:]])
     prompt = f"{system_instruction}\n\nChat History:\n{context_msgs}\n\nUser Question: {user_text}\nAnswer:"
     
-    try:
-        response = ai_client.models.generate_content(
-            model='gemini-2.5-flash',
-            contents=prompt
-        )
-        reply = response.text
-        
-        history.append({"role": "user", "text": user_text})
-        history.append({"role": "assistant", "text": reply})
-        user_chat_histories[user_id] = history
-        return reply
-    except Exception as e:
-        logger.error(f"Private Chat Gemini Error: {e}")
-        # যদি 2.5-flash এ কোনো সমস্যা হয় তবে বিকল্প চেষ্টা
+    # বর্তমান অ্যাক্টিভ মডেল ট্রাই করা
+    for model_name in ['gemini-3.8-flash', 'gemini-3.5-flash', 'gemini-2.0-flash']:
         try:
-            res_backup = ai_client.models.generate_content(model='gemini-1.5-flash', contents=prompt)
-            return res_backup.text
-        except Exception as e2:
-            logger.error(f"Backup Model Error: {e2}")
-            return f"⚠️ এআই ত্রুটি: {str(e)[:120]}"
+            response = ai_client.models.generate_content(
+                model=model_name,
+                contents=prompt
+            )
+            reply = response.text
+            
+            # হিস্ট্রি আপডেট
+            history.append({"role": "user", "text": user_text})
+            history.append({"role": "assistant", "text": reply})
+            user_chat_histories[user_id] = history
+            return reply
+        except Exception as e:
+            logger.warning(f"Chat failed on {model_name}: {e}")
+            continue
+
+    return "⚠️ এআই সার্ভার রেসপন্স করছে না। কিছুক্ষণ পর আবার চেষ্টা করুন।"
 
 # -----------------------------------------------------------------------------
 # অ্যাডমিন কন্ট্রোল প্যানেল (/admin)
 # -----------------------------------------------------------------------------
 
 async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """শুধুমাত্র মূল অ্যাডমিনের জন্য ড্যাশবোর্ড"""
     if update.effective_user.id != ADMIN_ID:
         await update.message.reply_text("⛔ আপনি এই বটের মূল অ্যাডমিন নন।")
         return
@@ -144,12 +143,12 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"━━━━━━━━━━━━━━━━━━\n\n"
         f"👥 **অনুমোদিত ইউজার তালিকা:**\n{users_list}\n\n"
         f"📢 **অনুমোদিত চ্যানেল তালিকা:**\n{channels_list}\n\n"
-        f"💡 *যেকোনো ইউজার বা চ্যানেল বটে রিকোয়েস্ট পাঠালে আপনি সরাসরি এখানেই অনুমোদন/বাতিল বাটন পাবেন।*"
+        f"💡 *নতুন কেউ পারমিশন চাইলে সরাসরি রিকোয়েস্ট মেসেজে Approve/Deny অপশন পাবেন।*"
     )
     await update.message.reply_text(panel_text, parse_mode="HTML")
 
 # -----------------------------------------------------------------------------
-# বট হ্যান্ডলার ও পারমিশন
+# টেলিগ্রাম হ্যান্ডলার ও পারমিশন
 # -----------------------------------------------------------------------------
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -186,7 +185,6 @@ async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_T
     try:
         await waiting_msg.edit_text(reply_text, parse_mode="HTML")
     except Exception:
-        # যদি HTML পার্সিংয়ে সমস্যা হয় তবে সাধারণ টেক্সট হিসেবে পাঠানো
         await waiting_msg.edit_text(reply_text)
 
 async def handle_bot_channel_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -281,7 +279,7 @@ async def receive_custom_leave_message(update: Update, context: ContextTypes.DEF
     return ConversationHandler.END
 
 # -----------------------------------------------------------------------------
-# ব্যাকগ্রাউন্ড নিউজ মনিটরিং
+# ব্যাকগ্রাউন্ড ব্রডকাস্ট লুপ
 # -----------------------------------------------------------------------------
 
 async def background_market_scanner(app):
@@ -334,7 +332,7 @@ async def background_market_scanner(app):
         await asyncio.sleep(300)
 
 # -----------------------------------------------------------------------------
-# মেইন অ্যাপ
+# অ্যাপ্লিকেশন রানার
 # -----------------------------------------------------------------------------
 
 def main():
@@ -350,12 +348,12 @@ def main():
 
     app.add_handler(reject_conv)
     app.add_handler(CommandHandler("start", start_command))
-    app.add_handler(CommandHandler("admin", admin_panel))  # নতুন অ্যাডমিন কমান্ড
+    app.add_handler(CommandHandler("admin", admin_panel))
     app.add_handler(CallbackQueryHandler(handle_button_actions))
     app.add_handler(ChatMemberHandler(handle_bot_channel_add, ChatMemberHandler.MY_CHAT_MEMBER))
     app.add_handler(MessageHandler(filters.ChatType.PRIVATE & filters.TEXT & ~filters.COMMAND, handle_private_message))
 
-    # ব্যাকগ্রাউন্ড লুপ চালু
+    # ব্যাকগ্রাউন্ড মনিটর রান
     loop = asyncio.get_event_loop()
     loop.create_task(background_market_scanner(app))
 
