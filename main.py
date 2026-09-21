@@ -20,14 +20,12 @@ from telegram.ext import (
 )
 from google import genai
 
-# লগিং কনফিগারেশন
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-# রেলওয়ে এনভায়রনমেন্ট ভ্যারিয়েবল লোড
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0").strip())
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
@@ -35,14 +33,12 @@ PUBLIC_CHANNEL_ID = os.getenv("PUBLIC_CHANNEL_ID", "").strip()
 OWNER_NAME = os.getenv("OWNER_NAME", "Admin").strip()
 OWNER_USERNAME = os.getenv("OWNER_USERNAME", "").strip()
 
-# গুগল জেমিনি ক্লায়েন্ট ইনিশিয়ালাইজেশন
 try:
     ai_client = genai.Client(api_key=GEMINI_API_KEY)
 except Exception as e:
     logger.error(f"Gemini Init Error: {e}")
     ai_client = None
 
-# মেমোরি স্টোরেজ
 APPROVED_CHAT_USERS = {ADMIN_ID}
 APPROVED_CHANNELS = {PUBLIC_CHANNEL_ID} if PUBLIC_CHANNEL_ID else set()
 user_chat_histories = {}
@@ -57,7 +53,7 @@ RSS_FEEDS = [
 ]
 
 def get_binance_live_price(symbol="BTCUSDT"):
-    """সরাসরি লাইটওয়েট বাইন্যান্স পাবলিক API থেকে লাইভ প্রাইস সংগ্রহ"""
+    """বাইন্যান্স থেকে লাইভ বর্তমান প্রাইস"""
     try:
         url = f"https://api.binance.com/api/v3/ticker/24hr?symbol={symbol}"
         res = requests.get(url, timeout=5).json()
@@ -65,20 +61,17 @@ def get_binance_live_price(symbol="BTCUSDT"):
         high = float(res['highPrice'])
         low = float(res['lowPrice'])
         change = float(res['priceChangePercent'])
-        return f"\n[Binance Live Data: {symbol} | Current: \({price:,.2f} | 24h High:\){high:,.2f} | 24h Low: ${low:,.2f} | 24h Change: {change}%]\n"
+        return f"\n[Binance Live Data: {symbol} | বর্তমান দাম: \({price:,.2f} | 24h High:\){high:,.2f} | 24h Low: ${low:,.2f} | 24h পরিবর্তন: {change}%]\n"
     except Exception as e:
         logger.warning(f"Binance fetch error: {e}")
         return ""
 
 def clean_markdown(text: str) -> str:
-    """টেলিগ্রামের জন্য ক্লিন ফরম্যাটিং"""
-    import re
-    # অতিরিক্ত ভাঙা চিহ্ন দূর করা
     text = text.replace("**", "*")
     return text
 
 # -----------------------------------------------------------------------------
-# এআই ফাংশনসমূহ (রিয়েল-টাইম গুগল সার্চ ও কারেন্ট মডেল সহ)
+# এআই ফাংশন (Gemini 1.5 Flash - বিশ্বস্ত ও অফিসিয়াল)
 # -----------------------------------------------------------------------------
 
 def analyze_crypto_news(title: str, summary: str):
@@ -90,31 +83,28 @@ def analyze_crypto_news(title: str, summary: str):
     Headline: {title}
     Summary: {summary}
     
-    Evaluate market sentiment in Bengali. Output format:
+    Evaluate market sentiment in fluent Bengali.
+    Output strictly in this format:
     🚨 মার্কেট ইমপ্যাক্ট: [বুলিশ 🟢 / বেয়ারিশ 🔴 / নিউট্রাল ⚪ / চরম ভোলাটাইল ⚠️]
     📊 ধরন: [একক বড় ইভেন্ট / সাধারণ ক্লাস্টার নিউজ]
     💡 সম্ভাব্য প্রভাব: [১-২ লাইনে মূল প্রভাব]
     📝 সারসংক্ষেপ: [১ লাইনে মূল খবর]
     """
-    
-    # নতুন গুগল প্রজেক্টের জন্য ভ্যালিড মডেলগুলোর তালিকা
-    models_to_try = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash']
-    for model_name in models_to_try:
-        try:
-            response = ai_client.models.generate_content(
-                model=model_name,
-                contents=prompt
-            )
-            return clean_markdown(response.text)
-        except Exception as e:
-            continue
-    return None
+    try:
+        # gemini-1.5-flash সকল প্রজেক্টে স্থায়ীভাবে সক্রিয়
+        response = ai_client.models.generate_content(
+            model='gemini-1.5-flash',
+            contents=prompt
+        )
+        return clean_markdown(response.text)
+    except Exception as e:
+        logger.error(f"News Analysis failed on gemini-1.5-flash: {e}")
+        return None
 
 def analyze_user_crypto_query(user_id: int, user_text: str):
     if not ai_client:
         return "⚠️ API Key লোড হয়নি। দয়া করে রেলওয়ের GEMINI_API_KEY চেক করুন।"
 
-    # লাইভ বাইন্যান্স প্রাইস ডিটেক্ট করা
     live_data = ""
     upper_query = user_text.upper()
     if "BTC" in upper_query or "BITCOIN" in upper_query or "বিটকয়েন" in user_text:
@@ -125,46 +115,34 @@ def analyze_user_crypto_query(user_id: int, user_text: str):
         live_data = get_binance_live_price("SOLUSDT")
 
     history = user_chat_histories.get(user_id, [])
-    
     system_instruction = (
         "You are an exclusive AI Crypto & Financial Market Analyst. "
         "Strictly answer only questions related to cryptocurrencies, blockchain, support/resistance levels, "
         "whale alerts, and macroeconomic/geopolitical events impacting markets. "
         "If live market price data is provided, use it directly to calculate realistic current levels. "
-        "Write in fluent, professional Bengali without broken Markdown or excessive asterisks. "
+        "Write in fluent, professional Bengali. "
         "If anything unrelated is asked, reply: 'দুঃখিত, আমি শুধুমাত্র ক্রিপ্টোকারেন্সি ও মার্কেট সম্পর্কিত বিষয় বিশ্লেষণে সক্ষম।'"
     )
 
     history_text = "\n".join([f"{item['role']}: {item['text']}" for item in history[-4:]])
     prompt = f"{system_instruction}\n{live_data}\n\nRecent History:\n{history_text}\n\nUser Question: {user_text}\nAnswer:"
 
-    last_error = ""
-    # কারেন্ট স্টেবল মডেল লিস্ট
-    models_to_try = ['gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-2.5-flash']
-
-    for model_name in models_to_try:
-        try:
-            response = ai_client.models.generate_content(
-                model=model_name,
-                contents=prompt
-            )
-            reply = clean_markdown(response.text)
-            
-            # হিস্ট্রি সেভ
-            history.append({"role": "user", "text": user_text})
-            history.append({"role": "assistant", "text": reply})
-            user_chat_histories[user_id] = history
-            return reply
-        except Exception as e:
-            last_error = str(e)
-            logger.warning(f"Error on {model_name}: {e}")
-            continue
-
-    # এরর হলে আসল কারণ মেসেজে দেখানো হবে যাতে বুঝতে সুবিধা হয়
-    return f"⚠️ এআই সার্ভার সমস্যা: {last_error[:150]}"
+    try:
+        response = ai_client.models.generate_content(
+            model='gemini-1.5-flash',
+            contents=prompt
+        )
+        reply = clean_markdown(response.text)
+        history.append({"role": "user", "text": user_text})
+        history.append({"role": "assistant", "text": reply})
+        user_chat_histories[user_id] = history
+        return reply
+    except Exception as e:
+        logger.error(f"Chat error: {e}")
+        return f"⚠️ এআই সার্ভার সমস্যা: {str(e)[:150]}"
 
 # -----------------------------------------------------------------------------
-# অ্যাডমিন প্যানেল ও টেলিগ্রাম হ্যান্ডলার
+# অ্যাডমিন ও প্রাইভেট হ্যান্ডলার
 # -----------------------------------------------------------------------------
 
 async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -307,19 +285,56 @@ async def receive_custom_leave_message(update: Update, context: ContextTypes.DEF
     return ConversationHandler.END
 
 # -----------------------------------------------------------------------------
-# ব্যাকগ্রাউন্ড নিউজ মনিটর (তাজা নিউজ ফিড)
+# ব্যাকগ্রাউন্ড নিউজ মনিটর (চালু হওয়ামাত্র ৫টি লাইভ নিউজ সম্প্রচার করবে)
 # -----------------------------------------------------------------------------
 
 async def background_market_scanner(app):
-    await asyncio.sleep(10)
-    for feed_url in RSS_FEEDS:
-        try:
-            f = feedparser.parse(feed_url)
-            for entry in f.entries[:5]:
-                seen_news_ids.add(entry.get("id", entry.link))
-        except Exception:
-            pass
+    await asyncio.sleep(5)
+    logger.info("Market Scanner Active. Fetching immediate initial news...")
 
+    # বট চালু হওয়ামাত্র তাজা সেরা ৫টি নিউজ তাৎক্ষণিক চ্যানেলে পাঠানো
+    initial_sent = 0
+    for feed_url in RSS_FEEDS:
+        if initial_sent >= 5:
+            break
+        try:
+            feed = feedparser.parse(feed_url)
+            for entry in feed.entries[:3]:
+                if initial_sent >= 5:
+                    break
+                nid = entry.get("id", entry.link)
+                if nid not in seen_news_ids:
+                    seen_news_ids.add(nid)
+                    title = entry.title
+                    summary = entry.get("summary", "")
+                    link = entry.link
+                    
+                    analysis = analyze_crypto_news(title, summary)
+                    if analysis:
+                        broadcast_text = (
+                            f"📰 **Breaking Crypto News**\n"
+                            f"**{title}**\n\n"
+                            f"{analysis}\n\n"
+                            f"🔗 [Read Full Coverage]({link})\n"
+                            f"━━━━━━━━━━━━━━━━━━\n"
+                            f"⚠️ *Automated AI Intelligence • DYOR*"
+                        )
+                        for ch_id in list(APPROVED_CHANNELS):
+                            try:
+                                await app.bot.send_message(
+                                    chat_id=ch_id,
+                                    text=broadcast_text,
+                                    parse_mode="HTML",
+                                    disable_web_page_preview=True
+                                )
+                                initial_sent += 1
+                                await asyncio.sleep(2)
+                            except Exception as e:
+                                logger.error(f"Initial broadcast error: {e}")
+        except Exception as e:
+            logger.error(f"Initial feed fetch error: {e}")
+
+    # এরপর প্রতি ৫ মিনিট পরপর নিয়মিত লাইভ স্ক্যান চলবে
     while True:
         try:
             for feed_url in RSS_FEEDS:
@@ -328,7 +343,6 @@ async def background_market_scanner(app):
                     nid = entry.get("id", entry.link)
                     if nid not in seen_news_ids:
                         seen_news_ids.add(nid)
-                        
                         title = entry.title
                         summary = entry.get("summary", "")
                         link = entry.link
@@ -352,7 +366,7 @@ async def background_market_scanner(app):
                                         disable_web_page_preview=True
                                     )
                                 except Exception as e:
-                                    logger.error(f"Broadcast error for {ch_id}: {e}")
+                                    logger.error(f"Broadcast error: {e}")
                         await asyncio.sleep(3)
         except Exception as e:
             logger.error(f"Scanner Loop Error: {e}")
@@ -360,7 +374,7 @@ async def background_market_scanner(app):
         await asyncio.sleep(300)
 
 # -----------------------------------------------------------------------------
-# অ্যাপ্লিকেশন রানার
+# মেইন অ্যাপ
 # -----------------------------------------------------------------------------
 
 def main():
@@ -384,7 +398,7 @@ def main():
     loop = asyncio.get_event_loop()
     loop.create_task(background_market_scanner(app))
 
-    logger.info("Bot is active...")
+    logger.info("Bot is active with Instant 5-News Broadcast...")
     app.run_polling()
 
 if __name__ == "__main__":
