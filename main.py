@@ -1,6 +1,6 @@
 """
 ╔══════════════════════════════════════════════════════════════════╗
-║          CRYPTO INTELLIGENCE TELEGRAM BOT v3.0                  ║
+║          CRYPTO INTELLIGENCE TELEGRAM BOT v3.1                  ║
 ║          24/7 Automated All-in-One Crypto Analyst               ║
 ║          Powered by Groq AI + Binance + Telegram                ║
 ╚══════════════════════════════════════════════════════════════════╝
@@ -14,13 +14,13 @@ import time
 import hashlib
 import logging
 import asyncio
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from collections import defaultdict
-from typing import Optional
+from typing import Optional, Tuple
 
 import feedparser
 import ccxt.async_support as ccxt
-from groq import AsyncGroq # Updated to AsyncGroq
+from groq import AsyncGroq
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from telegram import (
@@ -52,12 +52,12 @@ logger = logging.getLogger("CryptoIntelBot")
 # ─────────────────────────────────────────────────────────────
 # ENVIRONMENT VARIABLES
 # ─────────────────────────────────────────────────────────────
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
-GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
-PUBLIC_CHANNEL_ID = os.getenv("PUBLIC_CHANNEL_ID", "")
-OWNER_NAME = os.getenv("OWNER_NAME", "Admin")
-OWNER_USERNAME = os.getenv("OWNER_USERNAME", "")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
+PUBLIC_CHANNEL_ID = os.getenv("PUBLIC_CHANNEL_ID", "").strip()
+OWNER_NAME = os.getenv("OWNER_NAME", "Admin").strip()
+OWNER_USERNAME = os.getenv("OWNER_USERNAME", "").strip()
 
 assert TELEGRAM_BOT_TOKEN, "TELEGRAM_BOT_TOKEN is missing!"
 assert ADMIN_ID, "ADMIN_ID is missing!"
@@ -69,16 +69,16 @@ assert GROQ_API_KEY, "GROQ_API_KEY is missing!"
 groq_client = AsyncGroq(api_key=GROQ_API_KEY)
 
 # ─────────────────────────────────────────────────────────────
-# SYSTEM PROMPT — INFINITE CRYPTO BRAIN & MULTILINGUAL
+# SYSTEM PROMPT
 # ─────────────────────────────────────────────────────────────
 SYSTEM_PROMPT = """You are "Crypto Intel AI" — a world-class, encyclopedic crypto intelligence analyst. Your personality is elegant, professional, and precise.
 
-GLOBAL LANGUAGE SUPPORT (CRITICAL RULE):
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-You are a polyglot AI. You must AUTOMATICALLY detect the language the user is speaking (e.g., Bengali, English, Hindi, Arabic, Spanish, etc.) and RESPOND IN THAT EXACT SAME LANGUAGE. If they ask in Bengali, reply in fluent Bengali. If English, reply in English. Your crypto knowledge remains identical, only the output language changes.
+GLOBAL LANGUAGE SUPPORT:
+━━━━━━━━━━━━━━━━━━━━━━
+Automatically detect the language the user is speaking (e.g., Bengali, English, Hindi, Arabic, etc.) and RESPOND IN THAT EXACT SAME LANGUAGE. If asked in Bengali, reply in fluent Bengali.
 
 YOUR COMPLETE KNOWLEDGE DOMAIN:
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+━━━━━━━━━━━━━━━━━━━━━━
 1. All Cryptocurrencies (Fundamentals, Tokenomics, History).
 2. Trading Expertise (TA, Patterns, Support/Resistance, Volume).
 3. Leverage & Liquidation mechanics.
@@ -89,47 +89,7 @@ YOUR COMPLETE KNOWLEDGE DOMAIN:
 STRICT DOMAIN GUARDRAIL:
 ━━━━━━━━━━━━━━━━━━━━━━
 If ANY question falls outside cryptocurrency, trading, blockchain, DeFi, or related financial markets, politely decline in the user's language. 
-(Example in Bengali: "দুঃখিত, আমার কাছে এই ধরনের কোনো ডাটা নেই। আমি শুধুমাত্র ক্রিপ্টোকারেন্সি ও ট্রেডিং সম্পর্কিত বিষয় বিশ্লেষণে সক্ষম।")
-
-RESPONSE STYLE:
-━━━━━━━━━━━━━━
-- Be thorough yet concise.
-- Use data-driven analysis.
-- Include relevant metrics.
-- Structure answers with clear formatting and emojis.
-- Never give direct financial advice; frame as analysis."""
-
-# ─────────────────────────────────────────────────────────────
-# NEWS & LIQUIDATION PROMPTS
-# ─────────────────────────────────────────────────────────────
-NEWS_ANALYSIS_PROMPT = """You are a senior crypto market analyst. Analyze the following crypto news and provide a structured report.
-RULES:
-1. The HEADLINE must be in beautiful Bengali (বাংলা).
-2. ALL other analysis content must be in professional English.
-3. Include the exact date and time.
-4. Explain real impact, don't just say "market will go up/down".
-
-OUTPUT FORMAT:
-📰 [Bengali Headline Here]
-🕐 Date & Time: {date_time}
-📊 **Market Impact Analysis:** [Details]
-🎯 **Affected Assets:** [Coins]
-📈 **Sentiment:** [Bullish 🟢 / Bearish 🔴 / Neutral 🟡]
-🔒 **Confidence Level:** [High/Medium/Low] — [%]
-⚡ **Key Takeaway:** [Insight]
-━━━━━━━━━━━━━━━━━━━━━━
-🤖 Crypto Intel AI | Powered by Groq"""
-
-LIQUIDATION_PROMPT = """Analyze this liquidation/price movement data.
-OUTPUT FORMAT:
-🔥 [Bengali headline about the event]
-🕐 Time: {timestamp}
-💥 **Details:** {details}
-📊 **Root Cause Analysis:** [Explain why]
-⚠️ **What This Means:** [Market impact]
-📈 **Sentiment:** [Bullish 🟢 / Bearish 🔴 / Neutral 🟡]
-━━━━━━━━━━━━━━━━━━━━━━
-🤖 Crypto Intel AI"""
+(Example in Bengali: "দুঃখিত, আমার কাছে এই ধরনের কোনো ডাটা নেই। আমি শুধুমাত্র ক্রিপ্টোকারেন্সি ও ট্রেডিং সম্পর্কিত বিষয় বিশ্লেষণে সক্ষম।")"""
 
 # ─────────────────────────────────────────────────────────────
 # IN-MEMORY STORAGE
@@ -144,12 +104,8 @@ if PUBLIC_CHANNEL_ID:
     except ValueError:
         pass
 
-seen_news_hashes: set[str] = set()
-pending_reject_messages: dict[int, int] = {}
-previous_prices: dict[str, float] = {}
-
 last_groq_call: float = 0.0
-GROQ_MIN_INTERVAL = 2.0 
+GROQ_MIN_INTERVAL = 1.0 
 MAX_HISTORY_LENGTH = 20
 
 # ─────────────────────────────────────────────────────────────
@@ -161,8 +117,8 @@ def owner_link() -> str:
         return f'<a href="https://t.me/{username}">{html.escape(OWNER_NAME)}</a>'
     return html.escape(OWNER_NAME)
 
-async def rate_limited_groq_call(messages: list[dict], max_tokens: int = 2048) -> Optional[str]:
-    """Call Groq API asynchronously with rate limiting."""
+async def rate_limited_groq_call(messages: list[dict], max_tokens: int = 2048) -> Tuple[Optional[str], Optional[str]]:
+    """Call Groq API asynchronously and return (result, error_message)."""
     global last_groq_call
     now = time.time()
     elapsed = now - last_groq_call
@@ -171,7 +127,6 @@ async def rate_limited_groq_call(messages: list[dict], max_tokens: int = 2048) -
 
     try:
         last_groq_call = time.time()
-        # Using Llama 3.3 70B as requested
         response = await groq_client.chat.completions.create(
             model="llama-3.3-70b-versatile",
             messages=messages,
@@ -179,10 +134,10 @@ async def rate_limited_groq_call(messages: list[dict], max_tokens: int = 2048) -
             max_tokens=max_tokens,
             top_p=0.9,
         )
-        return response.choices[0].message.content
+        return response.choices[0].message.content, None
     except Exception as e:
         logger.error(f"Groq API error: {e}")
-        return None
+        return None, str(e)
 
 # ─────────────────────────────────────────────────────────────
 # COMMAND HANDLERS
@@ -219,7 +174,6 @@ async def cmd_clear(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_histories[user_id] = []
         await update.message.reply_text("🗑️ Chat history cleared!")
 
-# ─── BLOCK & UNBLOCK COMMANDS ───
 async def cmd_block(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID: return
     if not context.args:
@@ -248,7 +202,6 @@ async def cmd_unblock(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except ValueError:
         await update.message.reply_text("Invalid User ID.")
 
-# ─── USERS LIST WITH INLINE BUTTONS ───
 async def cmd_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID: return
     if not allowed_users:
@@ -316,7 +269,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     messages.extend(user_histories[user_id])
     messages.append({"role": "user", "content": text})
 
-    response_text = await rate_limited_groq_call(messages, max_tokens=3000)
+    response_text, error_details = await rate_limited_groq_call(messages, max_tokens=3000)
 
     if response_text:
         user_histories[user_id].append({"role": "user", "content": text})
@@ -329,7 +282,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except:
             await update.message.reply_text(response_text)
     else:
-        await update.message.reply_text("⚠️ API Connectivity Issue. Please try again.")
+        # Show EXACT Error Message on Telegram so we can fix it immediately
+        err_msg = (
+            "❌ <b>Groq API Connection Failed!</b>\n\n"
+            f"<b>Error Details:</b>\n<code>{html.escape(str(error_details))}</code>\n\n"
+            "💡 <b>How to Fix:</b> Please check your <code>GROQ_API_KEY</code> in Railway Variables."
+        )
+        await update.message.reply_text(err_msg, parse_mode=ParseMode.HTML)
 
 # ─────────────────────────────────────────────────────────────
 # MAIN APPLICATION SETUP
@@ -344,7 +303,7 @@ async def post_init(application: Application):
     ]
     await application.bot.set_my_commands(commands)
     try:
-        await application.bot.send_message(ADMIN_ID, "🟢 <b>Bot Online (v3.0)</b>\nMultilingual & Block system active.", parse_mode=ParseMode.HTML)
+        await application.bot.send_message(ADMIN_ID, "🟢 <b>Bot Updated (v3.1)</b>\nDebug Mode Active.", parse_mode=ParseMode.HTML)
     except: pass
 
 def main():
