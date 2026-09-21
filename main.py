@@ -1,4 +1,5 @@
 import os
+import io
 import asyncio
 import logging
 from datetime import datetime, timezone, timedelta
@@ -41,7 +42,9 @@ except Exception as e:
     logger.error(f"Groq Client Init Failed: {e}")
     groq_client = None
 
-GROQ_ACTIVE_MODEL = "openai/gpt-oss-120b"
+# টেক্সট ও ভয়েসের জন্য সক্রিয় মডেলসমূহ
+GROQ_CHAT_MODEL = "openai/gpt-oss-120b"
+GROQ_VOICE_MODEL = "whisper-large-v3"
 
 APPROVED_CHAT_USERS = {ADMIN_ID}
 APPROVED_CHANNELS = {PUBLIC_CHANNEL_ID} if PUBLIC_CHANNEL_ID else set()
@@ -57,40 +60,56 @@ RSS_FEEDS = [
 ]
 
 def get_channel_english_date_str() -> str:
-    """চ্যানেলের জন্য ১০০% খাঁটি ইংরেজি তারিখ (যেমন: 22 September 2026)"""
+    """পাবলিক চ্যানেলের জন্য ইংরেজি তারিখ (যেমন: 22 September 2026)"""
     bd_tz = timezone(timedelta(hours=6))
     now = datetime.now(bd_tz)
     return now.strftime("%d %B %Y")
 
 def get_user_current_time_str() -> str:
-    """ব্যবহারকারীর জন্য বর্তমান সময় ও তারিখ"""
+    """ব্যবহারকারীর জন্য সময় ও তারিখ"""
     bd_tz = timezone(timedelta(hours=6))
     now = datetime.now(bd_tz)
     return now.strftime("%d %B %Y, %I:%M %p")
 
 def format_clean_text(text: str) -> str:
-    """স্টারচিহ্ন এবং অপ্রয়োজনীয় মার্কডাউন দূর করা"""
+    """স্টারচিহ্ন মুক্ত টেক্সট"""
     if not text:
         return ""
     return text.replace("**", "").replace("*", "").strip()
 
-def get_binance_live_price(symbol="BTCUSDT"):
-    """বাইন্যান্স থেকে যেকোনো কয়েনের লাইভ মার্কেট ডাটা সংগ্রহ"""
+def get_binance_live_price(query_text: str):
+    """যেকোনো কয়েনের লাইভ ডাটা স্বয়ংক্রিয়ভাবে খোঁজা"""
     try:
-        url = f"https://api.binance.com/api/v3/ticker/24hr?symbol={symbol}"
-        res = requests.get(url, timeout=5).json()
+        clean_q = query_text.upper().replace("/", "").replace("-", " ")
+        words = clean_q.split()
+        target_symbol = None
+
+        for w in words:
+            if len(w) >= 2 and len(w) <= 10:
+                if w.endswith("USDT"):
+                    target_symbol = w
+                    break
+                elif w in ["BTC", "ETH", "SOL", "BNB", "XRP", "DOGE", "ADA", "AVAX", "SUI", "NEAR", "PEPE", "SHIB", "LINK", "DOT", "MATIC", "POL", "APT", "ARB", "OP", "FET", "RENDER", "WIF"]:
+                    target_symbol = f"{w}USDT"
+                    break
+
+        if not target_symbol:
+            return ""
+
+        url = f"https://api.binance.com/api/v3/ticker/24hr?symbol={target_symbol}"
+        res = requests.get(url, timeout=4).json()
         if 'lastPrice' in res:
             price = float(res['lastPrice'])
             high = float(res['highPrice'])
             low = float(res['lowPrice'])
             change = float(res['priceChangePercent'])
-            return f"\n[Live Binance Data: {symbol} | Price: \({price:,.4f} | 24h High:\){high:,.4f} | 24h Low: ${low:,.4f} | 24h Change: {change}%]\n"
+            return f"\n[Live Binance Data: {target_symbol} | Price: \({price:,.4f} | 24h High:\){high:,.4f} | 24h Low: ${low:,.4f} | 24h Change: {change}%]\n"
         return ""
     except Exception:
         return ""
 
 async def send_large_text_reply(update: Update, waiting_msg, full_text: str):
-    """টেলিগ্রামের লিমিট অনুযায়ী বড় মেসেজ নিরাপদভাবে পাঠানো"""
+    """টেলিগ্রাম লিমিট অনুযায়ী মেসেজ নিরাপদভাবে পাঠানো"""
     max_len = 3900
     if len(full_text) <= max_len:
         await waiting_msg.edit_text(full_text)
@@ -113,8 +132,25 @@ async def send_large_text_reply(update: Update, waiting_msg, full_text: str):
         await update.message.reply_text(part)
 
 # -----------------------------------------------------------------------------
-# এআই ফাংশনসমূহ (পূর্ণাঙ্গ ক্রিপ্টো জ্ঞান ও চ্যানেল ফরম্যাটিং)
+# এআই ফাংশনসমূহ (ভয়েস, বহুভাষিক ক্ষমতা ও এক্সচেঞ্জ ট্রেডিং গাইড)
 # -----------------------------------------------------------------------------
+
+def transcribe_audio_file(audio_bytes: bytes) -> str:
+    """টেলিগ্রামের অডিও বা ভয়েসকে টেক্সটে রূপান্তর"""
+    if not groq_client:
+        return ""
+    try:
+        audio_file = io.BytesIO(audio_bytes)
+        audio_file.name = "voice.ogg"
+        transcription = groq_client.audio.transcriptions.create(
+            file=audio_file,
+            model=GROQ_VOICE_MODEL,
+            response_format="text"
+        )
+        return transcription.strip()
+    except Exception as e:
+        logger.error(f"Voice Transcription Error: {e}")
+        return ""
 
 def analyze_crypto_news(title: str, summary: str):
     if not groq_client:
@@ -138,7 +174,7 @@ def analyze_crypto_news(title: str, summary: str):
 
     try:
         response = groq_client.chat.completions.create(
-            model=GROQ_ACTIVE_MODEL,
+            model=GROQ_CHAT_MODEL,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
@@ -153,57 +189,40 @@ def analyze_crypto_news(title: str, summary: str):
 
 def analyze_user_crypto_query(user_id: int, user_text: str):
     if not groq_client:
-        return "⚠️ এআই ত্রুটি: GROQ_API_KEY সেট করা হয়নি।"
+        return "⚠️ এআই ত্রুটি: GROQ_API_KEY কনফিগার করা হয়নি।"
 
-    # জনপ্রিয় কয়েনসমূহের ডাইনামিক লাইভ প্রাইস ডিটেকশন
-    live_data = ""
-    upper_query = user_text.upper()
-    common_tickers = [
-        "BTC", "ETH", "SOL", "BNB", "XRP", "ADA", "AVAX", "DOGE", "SUI", "NEAR",
-        "LINK", "PEPE", "SHIB", "DOT", "MATIC", "POL", "LTC", "APT", "ARB", "OP", "FET"
-    ]
-    for ticker in common_tickers:
-        if ticker in upper_query:
-            live_data = get_binance_live_price(f"{ticker}USDT")
-            break
-
+    live_data = get_binance_live_price(user_text)
     history = user_chat_histories.get(user_id, [])
     current_time_str = get_user_current_time_str()
 
     system_instruction = (
-        f"You are the Ultimate Crypto Intelligence Brain and Senior Technical Analyst. Current Date/Time: {current_time_str}. "
-        "You have complete and encyclopedic knowledge of the entire cryptocurrency industry, TradingView charts, and financial markets:\n"
-        "1. TradingView Macro Indices: "
-        "- TOTAL (Total crypto market cap), TOTAL2 (Total market cap excluding BTC), TOTAL3 (Altcoin market cap excluding BTC & ETH), "
-        "- BTC.D (Bitcoin dominance), USDT.D (Tether dominance), OTHERS (Mid/micro-cap altcoins index). "
-        "When user asks about TOTAL3 or Altcoins support/market cap, directly analyze the current billion-dollar support/resistance zones, liquidity rotation from BTC to Altcoins, and whether an Altseason setup is forming.\n"
-        "2. Coins & Categories: "
-        "- Layer 1s (BTC, ETH, SOL, BNB, SUI, AVAX, NEAR, ADA)\n"
-        "- Layer 2s & Rollups (ARB, OP, MATIC/POL, BASE ecosystem)\n"
-        "- Memecoins (DOGE, SHIB, PEPE, WIF, FLOKI, BONK)\n"
-        "- AI Tokens (NEAR, FET/ASI, RENDER), DeFi (UNI, AAVE, MKR), and RWA (ONDO).\n"
-        "3. Market Mechanics: Orderbook liquidity, Whales on-chain wallet tracking, Funding Rates, Long/Short liquidation heatmaps, Tokenomics (Unlocks/Vesting), Spot/Perpetual futures, and Fed Macroeconomic rate cuts (FOMC/CPI).\n\n"
-        "CRITICAL RULES:\n"
-        "- Never say you don't know any crypto concept, pair, or index. You understand all crypto terminology.\n"
-        "- Keep answers direct, concise, and to-the-point in natural professional Bengali. Answer ONLY what was asked without unnecessary long essays.\n"
-        "- Do NOT use markdown asterisks (**).\n"
-        "- If live Binance price data is provided, use it for exact realistic support and resistance numbers.\n"
-        "- If a completely non-financial, non-crypto question is asked, strictly reply: 'দুঃখিত, আমি শুধুমাত্র ক্রিপ্টোকারেন্সি ও মার্কেট সম্পর্কিত বিষয় বিশ্লেষণে সক্ষম।'"
+        f"You are the Master Crypto Intelligence, Trading Educator & Polyglot Technical Brain. Current Date/Time: {current_time_str}. "
+        "You possess encyclopedic knowledge across all crypto domains:\n"
+        "1. Trading & Exchanges Mastery: Step-by-step practical guides for Binance, Bybit, Bitget, KuCoin, MEXC, OKX, BingX, DEXs (Uniswap, Raydium, PancakeSwap). "
+        "You can clearly teach Spot Trading (Limit, Market, Stop-Limit, OCO), Futures/Perpetual Trading (Cross/Isolated Margin, Leverage management, Long/Short positions, Liquidation price calculation, Take-Profit/Stop-Loss setups, Funding Rates).\n"
+        "2. Comprehensive Token Knowledge: All TradingView coins, newly launched tokens, Layer 1/2, Memecoins, DeFi, AI tokens, and macro indices (TOTAL, TOTAL2, TOTAL3, BTC.D, USDT.D, OTHERS).\n"
+        "3. UNIVERSAL MULTILINGUAL & REGIONAL DIALECT CAPABILITY:\n"
+        "- CRITICAL: Automatically detect the EXACT language and regional dialect of the user's input, and reply in that EXACT same language/dialect! "
+        "If the user speaks in standard Bengali, reply in Bengali. If they speak in Sylheti, Chittagonian (চাটগাঁইয়া), Noakhali, Dhakaiya, or any Bangladeshi regional dialect, reply naturally in that dialect! "
+        "If they speak English, Hindi, Urdu, Arabic, Spanish, French, or any world language, reply in that exact language. "
+        "- If the user explicitly commands you to speak in a specific language (e.g. 'বাংলায় বলো', 'Speak in English', 'চাটগাঁইয়া ভাষায় কও'), strictly obey and switch immediately.\n"
+        "4. Tone & Length: Direct, accurate, concise, and to-the-point. Do NOT use markdown asterisks (**). "
+        "If a completely non-financial and non-crypto question is asked, reply in the user's language that you are strictly a crypto/trading specialist."
     )
 
     messages = [{"role": "system", "content": system_instruction}]
     for h in history[-3:]:
         messages.append({"role": h["role"], "content": h["text"]})
     
-    current_content = f"{live_data}\nইউজার প্রশ্ন: {user_text}"
+    current_content = f"{live_data}\nUser Input: {user_text}"
     messages.append({"role": "user", "content": current_content})
 
     try:
         response = groq_client.chat.completions.create(
-            model=GROQ_ACTIVE_MODEL,
+            model=GROQ_CHAT_MODEL,
             messages=messages,
             temperature=0.3,
-            max_tokens=650
+            max_tokens=850
         )
         reply = format_clean_text(response.choices[0].message.content)
         history.append({"role": "user", "text": user_text})
@@ -212,10 +231,10 @@ def analyze_user_crypto_query(user_id: int, user_text: str):
         return reply
     except Exception as e:
         logger.error(f"Groq Chat Error: {e}")
-        return f"⚠️ এআই ত্রুটি: {str(e)[:120]}"
+        return f"⚠️ Error: {str(e)[:120]}"
 
 # -----------------------------------------------------------------------------
-# অ্যাডমিন ড্যাশবোর্ড ও বট কমান্ড
+# অ্যাডমিন ও টেলিগ্রাম হ্যান্ডলার (টেক্সট ও ভয়েস সাপোর্ট)
 # -----------------------------------------------------------------------------
 
 async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -240,8 +259,8 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if user.id in APPROVED_CHAT_USERS:
         await update.message.reply_text(
-            f"স্বাগতম {user.first_name}! আমি আপনার সর্বজনীন ক্রিপ্টো ও ট্রেডিং ইন্টেলিজেন্স এআই।\n"
-            "TOTAL3, বিটকয়েন ডমিন্যান্স, অল্টকয়েন সাপোর্ট-রেজিস্ট্যান্স বা যেকোনো কয়েন নিয়ে প্রশ্ন করতে পারেন।"
+            f"স্বাগতম {user.first_name}! আমি আপনার সর্বজনীন ক্রিপ্টো, ট্রেডিং ও ভয়েস এআই।\n"
+            "যেকোনো ভাষায় লিখে বা সরাসরি ভয়েস মেসেজ পাঠিয়ে ক্রিপ্টো মার্কেট, স্পট/ফিউচার ট্রেডিং বা কয়েন নিয়ে প্রশ্ন করতে পারেন।"
         )
     else:
         await update.message.reply_text("⛔ আপনি অনুমোদিত ইউজার নন। অ্যাডমিনের কাছে এক্সেস রিকোয়েস্ট পাঠানো হয়েছে।")
@@ -262,10 +281,41 @@ async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_T
         return
 
     user_query = update.message.text
-    waiting_msg = await update.message.reply_text("🔍 ক্রিপ্টো মেট্রিক্স পর্যালোচনা করছি...")
+    waiting_msg = await update.message.reply_text("🔍 পর্যালোচনা করছি...")
 
     reply_text = analyze_user_crypto_query(user.id, user_query)
     await send_large_text_reply(update, waiting_msg, reply_text)
+
+async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """টেলিগ্রামের ভয়েস মেসেজ প্রসেসিং"""
+    user = update.effective_user
+    if user.id not in APPROVED_CHAT_USERS:
+        await update.message.reply_text("⛔ আপনার চ্যাট এক্সেস এখনো অনুমোদিত হয়নি।")
+        return
+
+    voice = update.message.voice or update.message.audio
+    if not voice:
+        return
+
+    waiting_msg = await update.message.reply_text("🎙️ ভয়েস শুনছি এবং বিশ্লেষণ করছি...")
+
+    try:
+        tg_file = await context.bot.get_file(voice.file_id)
+        audio_stream = io.BytesIO()
+        await tg_file.download_to_memory(audio_stream)
+        audio_bytes = audio_stream.getvalue()
+
+        transcribed_text = transcribe_audio_file(audio_bytes)
+        if not transcribed_text:
+            await waiting_msg.edit_text("⚠️ ভয়েস পরিষ্কারভাবে শোনা যায়নি। অনুগ্রহ করে আবার বলুন বা লিখে পাঠান।")
+            return
+
+        reply_text = analyze_user_crypto_query(user.id, transcribed_text)
+        final_reply = f"🗣️ আপনার কথা: \"{transcribed_text}\"\n\n{reply_text}"
+        await send_large_text_reply(update, waiting_msg, final_reply)
+    except Exception as e:
+        logger.error(f"Voice Handle Error: {e}")
+        await waiting_msg.edit_text(f"⚠️ ভয়েস প্রসেসিং ত্রুটি: {str(e)[:100]}")
 
 async def handle_bot_channel_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
     result = update.my_chat_member
@@ -458,7 +508,7 @@ async def background_market_scanner(app):
         await asyncio.sleep(300)
 
 # -----------------------------------------------------------------------------
-# মেইন অ্যাপ রানার
+# মেইন অ্যাপ
 # -----------------------------------------------------------------------------
 
 def main():
@@ -478,11 +528,12 @@ def main():
     app.add_handler(CallbackQueryHandler(handle_button_actions))
     app.add_handler(ChatMemberHandler(handle_bot_channel_add, ChatMemberHandler.MY_CHAT_MEMBER))
     app.add_handler(MessageHandler(filters.ChatType.PRIVATE & filters.TEXT & ~filters.COMMAND, handle_private_message))
+    app.add_handler(MessageHandler(filters.ChatType.PRIVATE & (filters.VOICE | filters.AUDIO), handle_voice_message))
 
     loop = asyncio.get_event_loop()
     loop.create_task(background_market_scanner(app))
 
-    logger.info("Bot is active with Complete Institutional Crypto Brain...")
+    logger.info("Bot running with Multilingual Voice & Complete Exchange Intelligence...")
     app.run_polling()
 
 if __name__ == "__main__":
