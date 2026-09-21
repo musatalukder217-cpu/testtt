@@ -11,6 +11,7 @@ from telegram import (
     InlineKeyboardButton,
     InlineKeyboardMarkup
 )
+from telegram.constants import ParseMode
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
@@ -33,8 +34,10 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0").strip())
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
 PUBLIC_CHANNEL_ID = os.getenv("PUBLIC_CHANNEL_ID", "").strip()
-OWNER_NAME = os.getenv("OWNER_NAME", "Admin").strip()
-OWNER_USERNAME = os.getenv("OWNER_USERNAME", "").strip()
+
+# আপনার নির্ধারিত নাম ও ইউজারনেম
+OWNER_NAME = "—͞Tᴍ Mᴜsᴀ⚡️"
+OWNER_USERNAME = "tmmusa73"
 
 try:
     groq_client = Groq(api_key=GROQ_API_KEY)
@@ -46,6 +49,7 @@ GROQ_CHAT_MODEL = "openai/gpt-oss-120b"
 GROQ_VOICE_MODEL = "whisper-large-v3"
 
 APPROVED_CHAT_USERS = {ADMIN_ID}
+PENDING_REQUEST_USERS = set()
 APPROVED_CHANNELS = {PUBLIC_CHANNEL_ID} if PUBLIC_CHANNEL_ID else set()
 user_chat_histories = {}
 seen_news_ids = set()
@@ -75,19 +79,21 @@ def format_clean_text(text: str) -> str:
     return text.replace("**", "").replace("*", "").strip()
 
 def is_text_mostly_english(text: str) -> bool:
-    """ইউজারের ইনপুট মূলত ইংরেজি কি না তা যাচাই করা"""
     if not text:
         return False
-    # বাংলা বর্ণমালা উপস্থিত থাকলে বাংলা হিসেবে গণ্য
     has_bengali = any('\u0980' <= c <= '\u09FF' for c in text)
     if has_bengali:
         return False
-    # ইংরেজি বর্ণের আধিক্য দেখা
     ascii_letters = sum(1 for c in text if c.isascii() and c.isalpha())
     return ascii_letters > (len(text) * 0.3)
 
+def has_invalid_script(text: str) -> bool:
+    for c in text:
+        if '\u0370' <= c <= '\u03FF' or '\u1F00' <= c <= '\u1FFF':
+            return True
+    return False
+
 def get_binance_live_price(query_text: str):
-    """ইউজার নিজে উল্লেখ করলেই কেবল নির্দিষ্ট কয়েনের লাইভ ডাটা আনা হবে"""
     try:
         clean_q = query_text.upper().replace("/", " ").replace("-", " ")
         target_symbol = None
@@ -111,7 +117,6 @@ def get_binance_live_price(query_text: str):
                         target_symbol = f"{w}USDT"
                         break
 
-        # জোর করে ডিফল্ট কোনো বিটকয়েন ডাটা পুশ করা হবে না
         if not target_symbol:
             return ""
 
@@ -130,7 +135,10 @@ def get_binance_live_price(query_text: str):
 async def send_large_text_reply(update: Update, waiting_msg, full_text: str):
     max_len = 3900
     if len(full_text) <= max_len:
-        await waiting_msg.edit_text(full_text)
+        try:
+            await waiting_msg.edit_text(full_text, parse_mode=ParseMode.MARKDOWN, disable_web_page_preview=True)
+        except Exception:
+            await waiting_msg.edit_text(full_text, disable_web_page_preview=True)
         return
 
     parts = []
@@ -145,29 +153,53 @@ async def send_large_text_reply(update: Update, waiting_msg, full_text: str):
     if full_text:
         parts.append(full_text)
 
-    await waiting_msg.edit_text(parts[0])
+    try:
+        await waiting_msg.edit_text(parts[0], parse_mode=ParseMode.MARKDOWN, disable_web_page_preview=True)
+    except Exception:
+        await waiting_msg.edit_text(parts[0], disable_web_page_preview=True)
+
     for part in parts[1:]:
-        await update.message.reply_text(part)
+        try:
+            await update.message.reply_text(part, parse_mode=ParseMode.MARKDOWN, disable_web_page_preview=True)
+        except Exception:
+            await update.message.reply_text(part, disable_web_page_preview=True)
 
 # -----------------------------------------------------------------------------
-# এআই ফাংশনসমূহ
+# অডিও ও এআই ইঞ্জিন
 # -----------------------------------------------------------------------------
 
 def transcribe_audio_file(audio_bytes: bytes) -> str:
-    """ভয়েসকে টেক্সটে রূপান্তর"""
     if not groq_client:
         return ""
+
+    acoustic_prompt = (
+        "বাঙালি আঞ্চলিক উপভাষা, চলিত ভাষা, চাটগাঁইয়া, নোয়াখালী, সিলেটি, ঢাকাইয়া, বাংলা, "
+        "English, Hindi, Arabic, cryptocurrency, Bitcoin, Ethereum, support, resistance."
+    )
+
     try:
         audio_file = io.BytesIO(audio_bytes)
         audio_file.name = "voice.ogg"
-        # প্রম্পট দিয়ে দেওয়া যাতে ভুল অন্য কোনো ভাষায় কনভার্ট না করে
         transcription = groq_client.audio.transcriptions.create(
             file=audio_file,
             model=GROQ_VOICE_MODEL,
             response_format="text",
-            prompt="Bengali and English conversation about daily topics and crypto"
+            prompt=acoustic_prompt
         )
-        return transcription.strip()
+        res_text = transcription.strip()
+
+        if has_invalid_script(res_text):
+            audio_file.seek(0)
+            retry_transcription = groq_client.audio.transcriptions.create(
+                file=audio_file,
+                model=GROQ_VOICE_MODEL,
+                response_format="text",
+                language="bn",
+                prompt="বাংলায় ক্রিপ্টো এবং সাধারণ প্রশ্ন।"
+            )
+            res_text = retry_transcription.strip()
+
+        return res_text
     except Exception as e:
         logger.error(f"Voice Transcription Error: {e}")
         return ""
@@ -211,6 +243,35 @@ def analyze_user_crypto_query(user_id: int, user_text: str):
     if not groq_client:
         return "⚠️ এআই ত্রুটি: GROQ_API_KEY কনফিগার করা হয়নি।"
 
+    # নির্মাতা সংক্রান্ত প্রশ্ন সরাসরি বহুভাষিক হ্যান্ডলার দিয়ে প্রসেস করা
+    low_text = user_text.lower()
+    creator_queries = [
+        "কে বানিয়েছে", "কে তৈরি করেছে", "who made you", "who created you", "who is your creator",
+        "owner কে", "তৈরি কে করেছে", "কার বট", "কে বানাইসে", "কে বানাইছে", "কার তৈরি", "maker",
+        "who built you", "tuhe kisne banaya", "কেনে বানাইল", "খনে বানাইসে"
+    ]
+    if any(q in low_text for q in creator_queries):
+        owner_markdown = f"[{OWNER_NAME}](https://t.me/{OWNER_USERNAME})"
+        creator_prompt = (
+            f"The user is asking who created/made you. Your creator is {owner_markdown}. "
+            "Detect the user's EXACT language or dialect (e.g. Standard Bengali, Sylheti, Chittagonian, Noakhali, English, Hindi, etc.) "
+            f"and reply naturally in that EXACT same language/dialect stating that you were created by {owner_markdown}. "
+            "Always keep the exact markdown link format intact so the user can click the name. Do not add raw asterisks."
+        )
+        try:
+            resp = groq_client.chat.completions.create(
+                model=GROQ_CHAT_MODEL,
+                messages=[
+                    {"role": "system", "content": creator_prompt},
+                    {"role": "user", "content": user_text}
+                ],
+                temperature=0.2,
+                max_tokens=150
+            )
+            return resp.choices[0].message.content.strip()
+        except Exception:
+            return f"আমাকে বানিয়েছেন [{OWNER_NAME}](https://t.me/{OWNER_USERNAME})।"
+
     live_data = get_binance_live_price(user_text)
     history = user_chat_histories.get(user_id, [])
     current_time_str = get_user_current_time_str()
@@ -222,15 +283,16 @@ def analyze_user_crypto_query(user_id: int, user_text: str):
         ) + "\n"
 
     system_instruction = (
-        f"You are a versatile, highly intelligent AI assistant and expert Crypto/Financial Brain. Current Date/Time: {current_time_str}.\n"
-        "IMPORTANT RULES ON TOPICS AND CONTEXT:\n"
-        "1. Context Relevance: Answer EXACTLY what the user asks! If the user asks for a Biryani recipe, cooking tips, or general life topics, provide that gracefully and accurately. DO NOT force or inject crypto charts/prices into cooking or everyday conversations.\n"
-        "2. Crypto Topics: When the user asks about crypto, Binance, trading, coins, or market direction, leverage your institutional trading mastery and the provided live data.\n"
-        "3. Language & Dialect Matching: ALWAYS detect the exact language of the user's input:\n"
-        "- If the user writes or speaks in Bengali (or any regional dialect like Sylheti, Chittagonian, etc.), respond in that exact Bengali/dialect.\n"
-        "- If the user writes or speaks in English, respond completely in professional English.\n"
-        "- If the user asks to switch languages, obey immediately.\n"
-        "4. Tone: Natural, direct, helpful, and concise. No markdown asterisks (**)."
+        f"You are the Exclusive Institutional Crypto Intelligence Brain. Current Date/Time: {current_time_str}.\n"
+        f"Creator Info: You were created by [{OWNER_NAME}](https://t.me/{OWNER_USERNAME}).\n\n"
+        "DIALECT & MULTILINGUAL MATCHING:\n"
+        "Detect the user's EXACT language and regional dialect (Standard Bengali, Sylheti, Chittagonian/চাটগাঁইয়া, Noakhali, Barisali, English, Hindi, Arabic, etc.). "
+        "Always reply in the EXACT matching tone, language, or dialect of the user.\n\n"
+        "STRICT DOMAIN SCOPE RESTRICTION:\n"
+        "1. You ONLY answer questions related to cryptocurrencies, blockchain, TradingView indices (TOTAL, TOTAL2, TOTAL3, BTC.D, USDT.D), trading tutorials (Spot, Futures, Leverage, Margin), and financial market economics.\n"
+        "2. FOR ANY NON-CRYPTO TOPICS (such as cooking recipes, Biryani, general knowledge, movies, personal questions):\n"
+        "   - Reply in the user's language/dialect stating politely that you are exclusively a cryptocurrency, chart, and market analyst and do not possess information on outside topics.\n\n"
+        "3. Output format: Direct, concise, no markdown asterisks (**)."
     )
 
     messages = [{"role": "system", "content": system_instruction}]
@@ -244,7 +306,7 @@ def analyze_user_crypto_query(user_id: int, user_text: str):
         response = groq_client.chat.completions.create(
             model=GROQ_CHAT_MODEL,
             messages=messages,
-            temperature=0.3,
+            temperature=0.2,
             max_tokens=850
         )
         reply = format_clean_text(response.choices[0].message.content)
@@ -257,7 +319,7 @@ def analyze_user_crypto_query(user_id: int, user_text: str):
         return f"⚠️ Error: {str(e)[:120]}"
 
 # -----------------------------------------------------------------------------
-# অ্যাডমিন ও হ্যান্ডলার
+# টেলিগ্রাম হ্যান্ডলার
 # -----------------------------------------------------------------------------
 
 async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -282,33 +344,41 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if user.id in APPROVED_CHAT_USERS:
         await update.message.reply_text(
-            f"স্বাগতম {user.first_name}! আমি আপনার পার্সোনাল এআই।\n"
-            "ক্রিপ্টো মার্কেট, ট্রেডিং কিংবা সাধারণ যেকোনো প্রশ্ন লিখে বা ভয়েসে জানাতে পারেন।"
+            f"স্বাগতম {user.first_name}! আমি আপনার ক্রিপ্টো ও ট্রেডিং এআই।\n"
+            "মার্কেট সাপোর্ট, রেজিস্ট্যান্স, TOTAL3 বা ফিউচার/স্পট ট্রেডিং নিয়ে যেকোনো প্রশ্ন করতে পারেন।"
         )
     else:
+        if user.id in PENDING_REQUEST_USERS:
+            await update.message.reply_text("⏳ আপনার এক্সেস রিকোয়েস্ট ইতিমধ্যে অ্যাডমিনের কাছে পাঠানো হয়েছে। অনুগ্রহ করে অ্যাডমিন অনুমোদন দেওয়া পর্যন্ত অপেক্ষা করুন।")
+            return
+
+        PENDING_REQUEST_USERS.add(user.id)
         await update.message.reply_text("⛔ আপনি অনুমোদিত ইউজার নন। অ্যাডমিনের কাছে এক্সেস রিকোয়েস্ট পাঠানো হয়েছে।")
+        
         keyboard = [[
-            InlineKeyboardButton("✅ Allow Chat", callback_data=f"user_allow_{user.id}"),
-            InlineKeyboardButton("❌ Deny", callback_data=f"user_deny_{user.id}")
+            InlineKeyboardButton("✅ Confirm", callback_data=f"user_confirm_{user.id}"),
+            InlineKeyboardButton("❌ Reject", callback_data=f"user_reject_{user.id}")
         ]]
         await context.bot.send_message(
             chat_id=ADMIN_ID,
-            text=f"👤 New Chat Request\nUser: @{user.username} (ID: {user.id})",
+            text=f"👤 New Access Request\nUser: @{user.username} (ID: {user.id})\nName: {user.full_name}",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
 
 async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if user.id not in APPROVED_CHAT_USERS:
-        await update.message.reply_text("⛔ আপনার চ্যাট এক্সেস এখনো অনুমোদিত হয়নি।")
+        if user.id in PENDING_REQUEST_USERS:
+            await update.message.reply_text("⏳ আপনার রিকোয়েস্ট বিবেচনাধীন রয়েছে। অ্যাডমিন অনুমোদন দিলে আপনি ব্যবহার করতে পারবেন।")
+        else:
+            await start_command(update, context)
         return
 
     user_query = update.message.text
-    # ভাষা অনুযায়ী ওয়েটিং মেসেজ
     if is_text_mostly_english(user_query):
-        wait_text = "🔍 Processing..."
+        wait_text = "🔍 Analyzing..."
     else:
-        wait_text = "🔍 পর্যালোচনা করছি..."
+        wait_text = "🔍 তথ্য বিশ্লেষণ করছি..."
 
     waiting_msg = await update.message.reply_text(wait_text)
     reply_text = analyze_user_crypto_query(user.id, user_query)
@@ -317,14 +387,17 @@ async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_T
 async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if user.id not in APPROVED_CHAT_USERS:
-        await update.message.reply_text("⛔ আপনার চ্যাট এক্সেস এখনো অনুমোদিত হয়নি।")
+        if user.id in PENDING_REQUEST_USERS:
+            await update.message.reply_text("⏳ আপনার রিকোয়েস্ট বিবেচনাধীন রয়েছে।")
+        else:
+            await start_command(update, context)
         return
 
     voice = update.message.voice or update.message.audio
     if not voice:
         return
 
-    waiting_msg = await update.message.reply_text("🎙️ Processing voice / ভয়েস শুনছি...")
+    waiting_msg = await update.message.reply_text("🎙️ শুনছি এবং পর্যালোচনা করছি...")
 
     try:
         tg_file = await context.bot.get_file(voice.file_id)
@@ -334,18 +407,17 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
 
         transcribed_text = transcribe_audio_file(audio_bytes)
         if not transcribed_text:
-            await waiting_msg.edit_text("⚠️ ভয়েস বোঝা যায়নি / Could not understand voice.")
+            await waiting_msg.edit_text("⚠️ কথাটি পরিষ্কারভাবে শোনা যায়নি। অনুগ্রহ করে আবার বলুন।")
             return
 
-        reply_text = analyze_user_crypto_query(user.id, transcribed_text)
-        
-        # ট্রান্সক্রাইবড ভাষা অনুযায়ী হেডার দেওয়া
-        if is_text_mostly_english(transcribed_text):
-            final_reply = f"🗣️ Your input: \"{transcribed_text}\"\n\n{reply_text}"
+        is_eng = is_text_mostly_english(transcribed_text)
+        if is_eng:
+            header = f"🗣️ Your voice: \"{transcribed_text}\"\n\n"
         else:
-            final_reply = f"🗣️ আপনার কথা: \"{transcribed_text}\"\n\n{reply_text}"
+            header = f"🗣️ আপনার কথা: \"{transcribed_text}\"\n\n"
 
-        await send_large_text_reply(update, waiting_msg, final_reply)
+        reply_text = analyze_user_crypto_query(user.id, transcribed_text)
+        await send_large_text_reply(update, waiting_msg, f"{header}{reply_text}")
     except Exception as e:
         logger.error(f"Voice Handle Error: {e}")
         await waiting_msg.edit_text(f"⚠️ Error: {str(e)[:100]}")
@@ -380,18 +452,24 @@ async def handle_button_actions(update: Update, context: ContextTypes.DEFAULT_TY
     await query.answer()
     data = query.data
 
-    if data.startswith("user_allow_"):
+    if data.startswith("user_confirm_"):
         uid = int(data.split("_")[2])
         APPROVED_CHAT_USERS.add(uid)
-        await query.edit_message_text(f"✅ User {uid} approved.")
+        PENDING_REQUEST_USERS.discard(uid)
+        await query.edit_message_text(f"✅ User {uid} approved successfully.")
         try:
-            await context.bot.send_message(chat_id=uid, text="🎉 অ্যাডমিন আপনার চ্যাট রিকোয়েস্ট অনুমোদন করেছেন!")
+            await context.bot.send_message(chat_id=uid, text="🎉 অ্যাডমিন আপনার এক্সেস অনুমোদন করেছেন! এখন থেকে আপনি বট ব্যবহার করতে পারেন।")
         except Exception:
             pass
 
-    elif data.startswith("user_deny_"):
+    elif data.startswith("user_reject_"):
         uid = int(data.split("_")[2])
-        await query.edit_message_text(f"❌ User {uid} denied.")
+        PENDING_REQUEST_USERS.discard(uid)
+        await query.edit_message_text(f"❌ User {uid} rejected. (Status reset: User can re-apply).")
+        try:
+            await context.bot.send_message(chat_id=uid, text="⛔ দুঃখিত, আপনার এক্সেস রিকোয়েস্ট এই মুহূর্তে বাতিল করা হয়েছে।")
+        except Exception:
+            pass
 
     elif data.startswith("chnl_approve_"):
         cid = int(data.split("_")[2])
@@ -411,15 +489,17 @@ async def receive_custom_leave_message(update: Update, context: ContextTypes.DEF
     target_channel_id = context.user_data.get('target_channel_to_leave')
 
     if target_channel_id:
+        owner_link = f"[{OWNER_NAME}](https://t.me/{OWNER_USERNAME})"
         final_msg = (
             f"{format_clean_text(custom_text)}\n\n"
             f"━━━━━━━━━━━━━━━━━━\n"
-            f"Owner: https://t.me/{OWNER_USERNAME} ({OWNER_NAME})"
+            f"Owner: {owner_link}"
         )
         try:
             await context.bot.send_message(
                 chat_id=target_channel_id,
                 text=final_msg,
+                parse_mode=ParseMode.MARKDOWN,
                 disable_web_page_preview=True
             )
         except Exception as e:
@@ -548,7 +628,7 @@ async def background_market_scanner(app):
         await asyncio.sleep(300)
 
 # -----------------------------------------------------------------------------
-# মেইন অ্যাপ
+# মেইন অ্যাপ রানার
 # -----------------------------------------------------------------------------
 
 def main():
@@ -573,7 +653,7 @@ def main():
     loop = asyncio.get_event_loop()
     loop.create_task(background_market_scanner(app))
 
-    logger.info("Bot is active with Context-Aware Multi-Domain Engine...")
+    logger.info("Bot is active with Verified Owner Identity...")
     app.run_polling()
 
 if __name__ == "__main__":
