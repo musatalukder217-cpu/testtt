@@ -2,6 +2,7 @@ import os
 import io
 import asyncio
 import logging
+import difflib
 from datetime import datetime, timezone, timedelta
 import feedparser
 import requests
@@ -29,13 +30,11 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# রেলওয়ে এনভায়রনমেন্ট ভ্যারিয়েবল
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0").strip())
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
 PUBLIC_CHANNEL_ID = os.getenv("PUBLIC_CHANNEL_ID", "").strip()
 
-# আপনার নির্ধারিত নাম ও ইউজারনেম
 OWNER_NAME = "—͞Tᴍ Mᴜsᴀ⚡️"
 OWNER_USERNAME = "tmmusa73"
 
@@ -54,6 +53,7 @@ APPROVED_CHANNELS = {PUBLIC_CHANNEL_ID} if PUBLIC_CHANNEL_ID else set()
 user_chat_histories = {}
 seen_news_ids = set()
 LATEST_NEWS_CACHE = []
+BINANCE_SYMBOLS = set()
 
 WAITING_REJECT_TEXT = 1
 
@@ -62,6 +62,21 @@ RSS_FEEDS = [
     "https://www.coindesk.com/arc/outboundfeeds/rss/",
     "https://decrypt.co/feed"
 ]
+
+def load_binance_symbols():
+    """বট চালুর সময় বাইন্যান্সের সব কয়েন লোড করা"""
+    global BINANCE_SYMBOLS
+    try:
+        url = "https://api.binance.com/api/v3/exchangeInfo"
+        data = requests.get(url, timeout=6).json()
+        for s in data.get("symbols", []):
+            if s.get("status") == "TRADING" and s.get("quoteAsset") == "USDT":
+                BINANCE_SYMBOLS.add(s["baseAsset"])
+        logger.info(f"Loaded {len(BINANCE_SYMBOLS)} crypto symbols from Binance.")
+    except Exception as e:
+        logger.error(f"Failed to load Binance symbols: {e}")
+
+load_binance_symbols()
 
 def get_channel_english_date_str() -> str:
     bd_tz = timezone(timedelta(hours=6))
@@ -78,14 +93,17 @@ def format_clean_text(text: str) -> str:
         return ""
     return text.replace("**", "").replace("*", "").strip()
 
-def is_text_mostly_english(text: str) -> bool:
+def is_pure_english(text: str) -> bool:
     if not text:
         return False
-    has_bengali = any('\u0980' <= c <= '\u09FF' for c in text)
-    if has_bengali:
+    if any('\u0980' <= c <= '\u09FF' for c in text):
+        return False
+    banglish_markers = ["ami", "tumi", "kemon", "acho", "accha", "shuno", "koro", "bolo", "hobe", "bujhte", "parcho", "kto", "koto", "ki", "korbo"]
+    low = text.lower()
+    if any(m in low.split() for m in banglish_markers):
         return False
     ascii_letters = sum(1 for c in text if c.isascii() and c.isalpha())
-    return ascii_letters > (len(text) * 0.3)
+    return ascii_letters > (len(text) * 0.4)
 
 def has_invalid_script(text: str) -> bool:
     for c in text:
@@ -93,33 +111,45 @@ def has_invalid_script(text: str) -> bool:
             return True
     return False
 
+def extract_crypto_symbol(text: str) -> str:
+    """উচ্চারণ বা ভাঙা বানান থেকে কয়েন খুঁজে বের করার স্মার্ট ইঞ্জিন"""
+    clean = text.lower().replace("?", " ").replace("/", " ").replace("-", " ")
+
+    # বাংলা ফনেটিক এবং ভাঙা শব্দের সরাসরি ম্যাপিং
+    aliases = {
+        "ইথুরেষাম": "ETH", "ইথেরিয়াম": "ETH", "ইথেরিয়াম": "ETH", "ইথিরিয়াম": "ETH", "ether": "ETH", "ethereum": "ETH",
+        "বিটকয়েন": "BTC", "বিটকয়েনের": "BTC", "বিটকোইন": "BTC", "bitcoin": "BTC", "btc": "BTC",
+        "সোলানা": "SOL", "সোলেয়ানা": "SOL", "solana": "SOL", "sol": "SOL",
+        "বাইনান্স": "BNB", "বিএনবি": "BNB", "bnb": "BNB",
+        "ডজ": "DOGE", "ডগকয়েন": "DOGE", "doge": "DOGE",
+        "পেপে": "PEPE", "pepe": "PEPE", "শিবা": "SHIB", "shib": "SHIB",
+        "রিপল": "XRP", "xrp": "XRP", "কার্ডানো": "ADA", "ada": "ADA",
+        "সুই": "SUI", "sui": "SUI", "নিয়ার": "NEAR", "near": "NEAR",
+        "পোলকাডট": "DOT", "dot": "DOT", "অ্যাভাক্স": "AVAX", "avax": "AVAX",
+        "পলিগন": "POL", "ম্যাটিক": "POL", "matic": "POL", "pol": "POL"
+    }
+
+    for key, sym in aliases.items():
+        if key in clean:
+            return sym
+
+    # ইংরেজি সিম্বল বা ট্রেডিংভিউ টিকার খোঁজা
+    tokens = clean.upper().split()
+    for token in tokens:
+        clean_tok = token.replace("USDT", "")
+        if clean_tok in BINANCE_SYMBOLS:
+            return clean_tok
+
+    return ""
+
 def get_binance_live_price(query_text: str):
+    """যেকোনো কয়েনের জন্য ১০০% রিয়েল-টাইম লাইভ ডাটা সংগ্রহ"""
+    sym = extract_crypto_symbol(query_text)
+    if not sym:
+        return ""
+
+    target_symbol = f"{sym}USDT"
     try:
-        clean_q = query_text.upper().replace("/", " ").replace("-", " ")
-        target_symbol = None
-
-        if any(k in clean_q for k in ["BTC", "BITCOIN", "বিটকয়েন", "বিটকয়েনের"]):
-            target_symbol = "BTCUSDT"
-        elif any(k in clean_q for k in ["ETH", "ETHEREUM", "ইথেরিয়াম", "ইথিরিয়াম"]):
-            target_symbol = "ETHUSDT"
-        elif any(k in clean_q for k in ["SOL", "SOLANA", "সোলানা"]):
-            target_symbol = "SOLUSDT"
-        elif any(k in clean_q for k in ["BNB", "BINANCE COIN"]):
-            target_symbol = "BNBUSDT"
-        else:
-            words = clean_q.split()
-            for w in words:
-                if len(w) >= 2 and len(w) <= 8:
-                    if w.endswith("USDT"):
-                        target_symbol = w
-                        break
-                    elif w in ["XRP", "DOGE", "ADA", "AVAX", "SUI", "NEAR", "PEPE", "SHIB", "LINK", "DOT", "MATIC", "POL", "APT", "ARB", "OP", "FET", "RENDER", "WIF"]:
-                        target_symbol = f"{w}USDT"
-                        break
-
-        if not target_symbol:
-            return ""
-
         url = f"https://api.binance.com/api/v3/ticker/24hr?symbol={target_symbol}"
         res = requests.get(url, timeout=4).json()
         if 'lastPrice' in res:
@@ -127,9 +157,10 @@ def get_binance_live_price(query_text: str):
             high = float(res['highPrice'])
             low = float(res['lowPrice'])
             change = float(res['priceChangePercent'])
-            return f"\n[Live Binance Verified: {target_symbol} | Price: \({price:,.2f} | 24h High:\){high:,.2f} | 24h Low: ${low:,.2f} | 24h Change: {change}%]\n"
+            return f"\n[REAL-TIME LIVE BINANCE DATA: {target_symbol} | Current Price: \({price:,.4f} | 24h High:\){high:,.4f} | 24h Low: ${low:,.4f} | 24h Change: {change}%]\n"
         return ""
-    except Exception:
+    except Exception as e:
+        logger.error(f"Binance price error: {e}")
         return ""
 
 async def send_large_text_reply(update: Update, waiting_msg, full_text: str):
@@ -173,8 +204,8 @@ def transcribe_audio_file(audio_bytes: bytes) -> str:
         return ""
 
     acoustic_prompt = (
-        "বাঙালি আঞ্চলিক উপভাষা, চলিত ভাষা, চাটগাঁইয়া, নোয়াখালী, সিলেটি, ঢাকাইয়া, বাংলা, "
-        "English, Hindi, Arabic, cryptocurrency, Bitcoin, Ethereum, support, resistance."
+        "বাঙালি আঞ্চলিক উপভাষা, ইথেরিয়াম, বিটকয়েন, সোলানা, ক্রিপ্টোকারেন্সি, "
+        "Ethereum, Bitcoin, Binance, TradingView, support, resistance."
     )
 
     try:
@@ -243,34 +274,34 @@ def analyze_user_crypto_query(user_id: int, user_text: str):
     if not groq_client:
         return "⚠️ এআই ত্রুটি: GROQ_API_KEY কনফিগার করা হয়নি।"
 
-    # নির্মাতা সংক্রান্ত প্রশ্ন সরাসরি বহুভাষিক হ্যান্ডলার দিয়ে প্রসেস করা
-    low_text = user_text.lower()
+    # ১. নির্মাতা সংক্রান্ত প্রশ্নের সরাসরি হার্ডকোড উত্তর
+    low_text = user_text.lower().replace("?", "").strip()
     creator_queries = [
         "কে বানিয়েছে", "কে তৈরি করেছে", "who made you", "who created you", "who is your creator",
         "owner কে", "তৈরি কে করেছে", "কার বট", "কে বানাইসে", "কে বানাইছে", "কার তৈরি", "maker",
-        "who built you", "tuhe kisne banaya", "কেনে বানাইল", "খনে বানাইসে"
+        "who built you", "tuhe kisne banaya", "tumhe kisne banaya", "কেনে বানাইল", "খনে বানাইসে",
+        "tomake k baniyeche", "tomake k banise", "tomar owner k", "tomar malik k"
     ]
     if any(q in low_text for q in creator_queries):
-        owner_markdown = f"[{OWNER_NAME}](https://t.me/{OWNER_USERNAME})"
-        creator_prompt = (
-            f"The user is asking who created/made you. Your creator is {owner_markdown}. "
-            "Detect the user's EXACT language or dialect (e.g. Standard Bengali, Sylheti, Chittagonian, Noakhali, English, Hindi, etc.) "
-            f"and reply naturally in that EXACT same language/dialect stating that you were created by {owner_markdown}. "
-            "Always keep the exact markdown link format intact so the user can click the name. Do not add raw asterisks."
-        )
-        try:
-            resp = groq_client.chat.completions.create(
-                model=GROQ_CHAT_MODEL,
-                messages=[
-                    {"role": "system", "content": creator_prompt},
-                    {"role": "user", "content": user_text}
-                ],
-                temperature=0.2,
-                max_tokens=150
-            )
-            return resp.choices[0].message.content.strip()
-        except Exception:
+        if is_pure_english(user_text):
+            return f"I was created by [{OWNER_NAME}](https://t.me/{OWNER_USERNAME})."
+        else:
             return f"আমাকে বানিয়েছেন [{OWNER_NAME}](https://t.me/{OWNER_USERNAME})।"
+
+    # ২. স্বাভাবিক কথোপকথন ও কুশল বিনিময়
+    greetings_map = {
+        "hi": "Hello! How can I assist you with crypto or markets today?",
+        "hello": "Hello! How can I assist you with crypto or markets today?",
+        "হাই": "হ্যালো! ক্রিপ্টো মার্কেট বা ট্রেডিং নিয়ে আপনাকে কীভাবে সাহায্য করতে পারি?",
+        "হ্যালো": "হ্যালো! ক্রিপ্টো মার্কেট বা ট্রেডিং নিয়ে আপনাকে কীভাবে সাহায্য করতে পারি?",
+        "কেমন আছো": "আমি ভালো আছি, ধন্যবাদ! আপনার ট্রেডিং কেমন চলছে?",
+        "kemon acho": "আমি ভালো আছি, ধন্যবাদ! আপনার ট্রেডিং কেমন চলছে?",
+        "tumi kemon acho": "আমি চমৎকার আছি! আপনার ক্রিপ্টো সংক্রান্ত কোনো আপডেট লাগবে?",
+        "tumi ki amar kotha bujhte parcho": "হ্যাঁ, আমি আপনার কথা পুরোপুরি বুঝতে পারছি। ক্রিপ্টো মার্কেট বা কয়েন নিয়ে যেকোনো প্রশ্ন করুন।"
+    }
+    for g_key, g_reply in greetings_map.items():
+        if g_key in low_text:
+            return g_reply
 
     live_data = get_binance_live_price(user_text)
     history = user_chat_histories.get(user_id, [])
@@ -283,16 +314,13 @@ def analyze_user_crypto_query(user_id: int, user_text: str):
         ) + "\n"
 
     system_instruction = (
-        f"You are the Exclusive Institutional Crypto Intelligence Brain. Current Date/Time: {current_time_str}.\n"
+        f"You are the Ultimate Real-Time Crypto Intelligence Brain. Current Live Date/Time: {current_time_str}.\n"
         f"Creator Info: You were created by [{OWNER_NAME}](https://t.me/{OWNER_USERNAME}).\n\n"
-        "DIALECT & MULTILINGUAL MATCHING:\n"
-        "Detect the user's EXACT language and regional dialect (Standard Bengali, Sylheti, Chittagonian/চাটগাঁইয়া, Noakhali, Barisali, English, Hindi, Arabic, etc.). "
-        "Always reply in the EXACT matching tone, language, or dialect of the user.\n\n"
-        "STRICT DOMAIN SCOPE RESTRICTION:\n"
-        "1. You ONLY answer questions related to cryptocurrencies, blockchain, TradingView indices (TOTAL, TOTAL2, TOTAL3, BTC.D, USDT.D), trading tutorials (Spot, Futures, Leverage, Margin), and financial market economics.\n"
-        "2. FOR ANY NON-CRYPTO TOPICS (such as cooking recipes, Biryani, general knowledge, movies, personal questions):\n"
-        "   - Reply in the user's language/dialect stating politely that you are exclusively a cryptocurrency, chart, and market analyst and do not possess information on outside topics.\n\n"
-        "3. Output format: Direct, concise, no markdown asterisks (**)."
+        "STRICT REAL-TIME ACCURACY & DATA BINDING:\n"
+        "1. Real-Time Price Enforcement: If [REAL-TIME LIVE BINANCE DATA] is provided, you MUST report that exact price! NEVER invent, hallucinate, or recall outdated historic prices (like ETH $1,800 or BTC $38,000). Always state the verified live market price provided.\n"
+        "2. Technical & Roadmap Updates: When discussing upcoming coin upgrades, roadmaps, and support/resistance zones, speak strictly in the context of the CURRENT live year (2026). Do NOT describe 2022/2023 historical events as recent.\n"
+        "3. Language & Dialect: Romanized Bengali (Banglish) is strictly Bengali. Reply in natural Bengali when addressed in Bengali or Banglish. Never use Hindi script for Banglish.\n"
+        "4. Tone & Scope: Concise, direct, authoritative crypto analysis. No markdown asterisks (**)."
     )
 
     messages = [{"role": "system", "content": system_instruction}]
@@ -344,12 +372,12 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if user.id in APPROVED_CHAT_USERS:
         await update.message.reply_text(
-            f"স্বাগতম {user.first_name}! আমি আপনার ক্রিপ্টো ও ট্রেডিং এআই।\n"
-            "মার্কেট সাপোর্ট, রেজিস্ট্যান্স, TOTAL3 বা ফিউচার/স্পট ট্রেডিং নিয়ে যেকোনো প্রশ্ন করতে পারেন।"
+            f"স্বাগতম {user.first_name}! আমি আপনার রিয়েল-টাইম ক্রিপ্টো ও ট্রেডিং এআই।\n"
+            "যেকোনো কয়েনের লাইভ দাম, চার্ট বিশ্লেষণ, TOTAL3 বা ট্রেডিং নিয়ে প্রশ্ন করতে পারেন।"
         )
     else:
         if user.id in PENDING_REQUEST_USERS:
-            await update.message.reply_text("⏳ আপনার এক্সেস রিকোয়েস্ট ইতিমধ্যে অ্যাডমিনের কাছে পাঠানো হয়েছে। অনুগ্রহ করে অ্যাডমিন অনুমোদন দেওয়া পর্যন্ত অপেক্ষা করুন।")
+            await update.message.reply_text("⏳ আপনার এক্সেস রিকোয়েস্ট বিবেচনাধীন রয়েছে। অ্যাডমিন অনুমোদন দেওয়া পর্যন্ত অপেক্ষা করুন।")
             return
 
         PENDING_REQUEST_USERS.add(user.id)
@@ -369,16 +397,16 @@ async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_T
     user = update.effective_user
     if user.id not in APPROVED_CHAT_USERS:
         if user.id in PENDING_REQUEST_USERS:
-            await update.message.reply_text("⏳ আপনার রিকোয়েস্ট বিবেচনাধীন রয়েছে। অ্যাডমিন অনুমোদন দিলে আপনি ব্যবহার করতে পারবেন।")
+            await update.message.reply_text("⏳ আপনার রিকোয়েস্ট বিবেচনাধীন রয়েছে।")
         else:
             await start_command(update, context)
         return
 
     user_query = update.message.text
-    if is_text_mostly_english(user_query):
-        wait_text = "🔍 Analyzing..."
+    if is_pure_english(user_query):
+        wait_text = "🔍 Analyzing live market..."
     else:
-        wait_text = "🔍 তথ্য বিশ্লেষণ করছি..."
+        wait_text = "🔍 লাইভ মার্কেট যাচাই করছি..."
 
     waiting_msg = await update.message.reply_text(wait_text)
     reply_text = analyze_user_crypto_query(user.id, user_query)
@@ -397,7 +425,7 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
     if not voice:
         return
 
-    waiting_msg = await update.message.reply_text("🎙️ শুনছি এবং পর্যালোচনা করছি...")
+    waiting_msg = await update.message.reply_text("🎙️ ভয়েস শুনছি...")
 
     try:
         tg_file = await context.bot.get_file(voice.file_id)
@@ -410,7 +438,7 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
             await waiting_msg.edit_text("⚠️ কথাটি পরিষ্কারভাবে শোনা যায়নি। অনুগ্রহ করে আবার বলুন।")
             return
 
-        is_eng = is_text_mostly_english(transcribed_text)
+        is_eng = is_pure_english(transcribed_text)
         if is_eng:
             header = f"🗣️ Your voice: \"{transcribed_text}\"\n\n"
         else:
@@ -467,7 +495,7 @@ async def handle_button_actions(update: Update, context: ContextTypes.DEFAULT_TY
         PENDING_REQUEST_USERS.discard(uid)
         await query.edit_message_text(f"❌ User {uid} rejected. (Status reset: User can re-apply).")
         try:
-            await context.bot.send_message(chat_id=uid, text="⛔ দুঃখিত, আপনার এক্সেস রিকোয়েস্ট এই মুহূর্তে বাতিল করা হয়েছে।")
+            await context.bot.send_message(chat_id=uid, text="⛔ দুঃখিত, আপনার এক্সেস রিকোয়েস্ট বাতিল করা হয়েছে।")
         except Exception:
             pass
 
@@ -653,7 +681,7 @@ def main():
     loop = asyncio.get_event_loop()
     loop.create_task(background_market_scanner(app))
 
-    logger.info("Bot is active with Verified Owner Identity...")
+    logger.info("Bot is active with Universal Binance Asset Matcher...")
     app.run_polling()
 
 if __name__ == "__main__":
