@@ -26,7 +26,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# এনভায়রনমেন্ট ভ্যারিয়েবল
+# রেলওয়ে এনভায়রনমেন্ট ভ্যারিয়েবল
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0").strip())
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
@@ -54,11 +54,13 @@ RSS_FEEDS = [
 ]
 
 def format_clean_text(text: str) -> str:
+    """স্টারচিহ্ন মুক্ত পরিষ্কার টেক্সট"""
     if not text:
         return ""
     return text.replace("**", "").replace("*", "").strip()
 
 def get_binance_live_price(symbol="BTCUSDT"):
+    """সরাসরি লাইভ মার্কেট ডাটা"""
     try:
         url = f"https://api.binance.com/api/v3/ticker/24hr?symbol={symbol}"
         res = requests.get(url, timeout=5).json()
@@ -71,40 +73,55 @@ def get_binance_live_price(symbol="BTCUSDT"):
         logger.warning(f"Binance fetch error: {e}")
         return ""
 
+def get_active_groq_model():
+    """Groq API থেকে স্বয়ংক্রিয়ভাবে সক্রিয় মডেল নির্বাচন"""
+    if not groq_client:
+        return "llama-3.1-8b-instant"
+    try:
+        models_data = groq_client.models.list()
+        active_ids = [m.id for m in models_data.data]
+        preferred = ["llama-3.1-8b-instant", "llama-3.3-70b-versatile", "mixtral-8x7b-32768"]
+        for p in preferred:
+            if p in active_ids:
+                return p
+        return active_ids[0]
+    except Exception as e:
+        logger.warning(f"Model auto-detect error: {e}")
+        return "llama-3.1-8b-instant"
+
 # -----------------------------------------------------------------------------
-# Groq AI ইঞ্জিন (সক্রিয় ও স্থায়ী মডেলসমূহ)
+# Groq AI এনালাইসিস ইঞ্জিন
 # -----------------------------------------------------------------------------
 
 def analyze_crypto_news(title: str, summary: str):
     if not groq_client:
         return None
 
+    model_name = get_active_groq_model()
     system_prompt = (
-        "You are an elite crypto market analyst. Analyze the given news. "
-        "Output strictly in Bengali without asterisks. "
+        "You are an elite crypto analyst. Analyze the given news headline and summary. "
+        "Output strictly in fluent Bengali without any asterisks. "
         "Format:\n"
-        "মার্কেট ইমপ্যাক্ট: [বুলিশ / বেয়ারিশ / নিউট্রাল]\n"
+        "মার্কেট ইমপ্যাক্ট: [বুলিশ / বেয়ারিশ / নিউট্রাল / চরম ভোলাটাইল]\n"
         "সম্ভাব্য প্রভাব: [১-২ লাইনে মূল প্রভাব]\n"
         "সারসংক্ষেপ: [১ লাইনে মূল খবর]"
     )
     user_prompt = f"Headline: {title}\nSummary: {summary}"
 
-    models = ["llama-3.1-70b-versatile", "llama-3.1-8b-instant", "llama3-70b-8192", "llama3-8b-8192"]
-    for model_name in models:
-        try:
-            response = groq_client.chat.completions.create(
-                model=model_name,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt}
-                ],
-                temperature=0.3,
-                max_tokens=250
-            )
-            return format_clean_text(response.choices[0].message.content)
-        except Exception:
-            continue
-    return None
+    try:
+        response = groq_client.chat.completions.create(
+            model=model_name,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
+            temperature=0.3,
+            max_tokens=250
+        )
+        return format_clean_text(response.choices[0].message.content)
+    except Exception as e:
+        logger.error(f"Groq News Analysis Error: {e}")
+        return None
 
 def analyze_user_crypto_query(user_id: int, user_text: str):
     if not groq_client:
@@ -122,7 +139,7 @@ def analyze_user_crypto_query(user_id: int, user_text: str):
     history = user_chat_histories.get(user_id, [])
 
     system_instruction = (
-        "You are an expert AI Crypto Analyst. "
+        "You are an exclusive AI Crypto Analyst. "
         "Strictly answer only regarding cryptocurrencies, support/resistance, and macroeconomics. "
         "Use the provided live Binance market data to calculate real levels. "
         "Write in fluent, professional Bengali without asterisks. "
@@ -136,29 +153,25 @@ def analyze_user_crypto_query(user_id: int, user_text: str):
     current_content = f"{live_data}\nইউজার প্রশ্ন: {user_text}"
     messages.append({"role": "user", "content": current_content})
 
-    models = ["llama-3.1-70b-versatile", "llama-3.1-8b-instant", "llama3-70b-8192", "llama3-8b-8192"]
-    last_err = ""
-    for model_name in models:
-        try:
-            response = groq_client.chat.completions.create(
-                model=model_name,
-                messages=messages,
-                temperature=0.4,
-                max_tokens=700
-            )
-            reply = format_clean_text(response.choices[0].message.content)
-            history.append({"role": "user", "text": user_text})
-            history.append({"role": "assistant", "text": reply})
-            user_chat_histories[user_id] = history
-            return reply
-        except Exception as e:
-            last_err = str(e)
-            continue
-
-    return f"⚠️ এআই ত্রুটি: {last_err[:120]}"
+    model_name = get_active_groq_model()
+    try:
+        response = groq_client.chat.completions.create(
+            model=model_name,
+            messages=messages,
+            temperature=0.4,
+            max_tokens=700
+        )
+        reply = format_clean_text(response.choices[0].message.content)
+        history.append({"role": "user", "text": user_text})
+        history.append({"role": "assistant", "text": reply})
+        user_chat_histories[user_id] = history
+        return reply
+    except Exception as e:
+        logger.error(f"Groq Chat Error: {e}")
+        return f"⚠️ এআই ত্রুটি: {str(e)[:120]}"
 
 # -----------------------------------------------------------------------------
-# টেলিগ্রাম হ্যান্ডলার
+# অ্যাডমিন ও টেলিগ্রাম হ্যান্ডলার
 # -----------------------------------------------------------------------------
 
 async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -294,7 +307,7 @@ async def receive_custom_leave_message(update: Update, context: ContextTypes.DEF
     return ConversationHandler.END
 
 # -----------------------------------------------------------------------------
-# ব্যাকগ্রাউন্ড স্ক্যানার
+# ব্যাকগ্রাউন্ড স্ক্যানার (তাজা নিউজ সম্প্রচার)
 # -----------------------------------------------------------------------------
 
 async def background_market_scanner(app):
@@ -405,7 +418,7 @@ def main():
     loop = asyncio.get_event_loop()
     loop.create_task(background_market_scanner(app))
 
-    logger.info("Bot is listening on verified models...")
+    logger.info("Bot is active with Auto Model Detection...")
     app.run_polling()
 
 if __name__ == "__main__":
