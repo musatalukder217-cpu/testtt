@@ -40,6 +40,9 @@ except Exception as e:
     logger.error(f"Groq Client Init Failed: {e}")
     groq_client = None
 
+# স্থায়ী অফিসিয়াল চ্যাট মডেল
+GROQ_ACTIVE_MODEL = "llama-3.1-8b-instant"
+
 APPROVED_CHAT_USERS = {ADMIN_ID}
 APPROVED_CHANNELS = {PUBLIC_CHANNEL_ID} if PUBLIC_CHANNEL_ID else set()
 user_chat_histories = {}
@@ -54,13 +57,13 @@ RSS_FEEDS = [
 ]
 
 def format_clean_text(text: str) -> str:
-    """স্টারচিহ্ন মুক্ত পরিষ্কার টেক্সট"""
+    """স্টারচিহ্ন এবং অতিরিক্ত ফরম্যাটিং দূর করা"""
     if not text:
         return ""
     return text.replace("**", "").replace("*", "").strip()
 
 def get_binance_live_price(symbol="BTCUSDT"):
-    """সরাসরি লাইভ মার্কেট ডাটা"""
+    """সরাসরি লাইভ মার্কেট ডাটা সংগ্রহ"""
     try:
         url = f"https://api.binance.com/api/v3/ticker/24hr?symbol={symbol}"
         res = requests.get(url, timeout=5).json()
@@ -73,33 +76,16 @@ def get_binance_live_price(symbol="BTCUSDT"):
         logger.warning(f"Binance fetch error: {e}")
         return ""
 
-def get_active_groq_model():
-    """Groq API থেকে স্বয়ংক্রিয়ভাবে সক্রিয় মডেল নির্বাচন"""
-    if not groq_client:
-        return "llama-3.1-8b-instant"
-    try:
-        models_data = groq_client.models.list()
-        active_ids = [m.id for m in models_data.data]
-        preferred = ["llama-3.1-8b-instant", "llama-3.3-70b-versatile", "mixtral-8x7b-32768"]
-        for p in preferred:
-            if p in active_ids:
-                return p
-        return active_ids[0]
-    except Exception as e:
-        logger.warning(f"Model auto-detect error: {e}")
-        return "llama-3.1-8b-instant"
-
 # -----------------------------------------------------------------------------
-# Groq AI এনালাইসিস ইঞ্জিন
+# এআই ফাংশনসমূহ (Llama-3.1-8b-instant)
 # -----------------------------------------------------------------------------
 
 def analyze_crypto_news(title: str, summary: str):
     if not groq_client:
         return None
 
-    model_name = get_active_groq_model()
     system_prompt = (
-        "You are an elite crypto analyst. Analyze the given news headline and summary. "
+        "You are an elite crypto analyst. Analyze the given news. "
         "Output strictly in fluent Bengali without any asterisks. "
         "Format:\n"
         "মার্কেট ইমপ্যাক্ট: [বুলিশ / বেয়ারিশ / নিউট্রাল / চরম ভোলাটাইল]\n"
@@ -110,7 +96,7 @@ def analyze_crypto_news(title: str, summary: str):
 
     try:
         response = groq_client.chat.completions.create(
-            model=model_name,
+            model=GROQ_ACTIVE_MODEL,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
@@ -153,10 +139,9 @@ def analyze_user_crypto_query(user_id: int, user_text: str):
     current_content = f"{live_data}\nইউজার প্রশ্ন: {user_text}"
     messages.append({"role": "user", "content": current_content})
 
-    model_name = get_active_groq_model()
     try:
         response = groq_client.chat.completions.create(
-            model=model_name,
+            model=GROQ_ACTIVE_MODEL,
             messages=messages,
             temperature=0.4,
             max_tokens=700
@@ -312,7 +297,7 @@ async def receive_custom_leave_message(update: Update, context: ContextTypes.DEF
 
 async def background_market_scanner(app):
     await asyncio.sleep(5)
-    logger.info("Market scanner active. Processing fresh feeds...")
+    logger.info("Market scanner active. Dispatching initial fresh feeds...")
 
     initial_count = 0
     for feed_url in RSS_FEEDS:
@@ -418,7 +403,7 @@ def main():
     loop = asyncio.get_event_loop()
     loop.create_task(background_market_scanner(app))
 
-    logger.info("Bot is active with Auto Model Detection...")
+    logger.info("Bot is active on llama-3.1-8b-instant...")
     app.run_polling()
 
 if __name__ == "__main__":
