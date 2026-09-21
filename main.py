@@ -1,754 +1,1185 @@
+"""
+╔══════════════════════════════════════════════════════════════════╗
+║          CRYPTO INTELLIGENCE TELEGRAM BOT v2.0                  ║
+║          24/7 Automated All-in-One Crypto Analyst               ║
+║          Powered by Groq AI + Binance + Telegram                ║
+╚══════════════════════════════════════════════════════════════════╝
+"""
+
 import os
-import io
-import asyncio
+import re
+import json
+import html
+import time
+import hashlib
 import logging
+import asyncio
 from datetime import datetime, timezone, timedelta
+from collections import defaultdict
+from typing import Optional
+
 import feedparser
-import requests
+import ccxt.async_support as ccxt
 from groq import Groq
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.interval import IntervalTrigger
+
 from telegram import (
     Update,
     InlineKeyboardButton,
-    InlineKeyboardMarkup
+    InlineKeyboardMarkup,
+    BotCommand,
 )
-from telegram.constants import ParseMode
 from telegram.ext import (
-    ApplicationBuilder,
+    Application,
     CommandHandler,
     MessageHandler,
     CallbackQueryHandler,
     ChatMemberHandler,
-    ConversationHandler,
     ContextTypes,
-    filters
+    filters,
 )
+from telegram.constants import ParseMode, ChatMemberStatus, ChatType
 
+# ─────────────────────────────────────────────────────────────
+# LOGGING
+# ─────────────────────────────────────────────────────────────
 logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
+    format="%(asctime)s │ %(name)s │ %(levelname)s │ %(message)s",
+    level=logging.INFO,
 )
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("CryptoIntelBot")
 
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
-ADMIN_ID = int(os.getenv("ADMIN_ID", "0").strip())
-GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
-PUBLIC_CHANNEL_ID = os.getenv("PUBLIC_CHANNEL_ID", "").strip()
+# ─────────────────────────────────────────────────────────────
+# ENVIRONMENT VARIABLES
+# ─────────────────────────────────────────────────────────────
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
+PUBLIC_CHANNEL_ID = os.getenv("PUBLIC_CHANNEL_ID", "")
+OWNER_NAME = os.getenv("OWNER_NAME", "Admin")
+OWNER_USERNAME = os.getenv("OWNER_USERNAME", "")
 
-OWNER_NAME = "—͞Tᴍ Mᴜsᴀ⚡️"
-OWNER_USERNAME = "tmmusa73"
+assert TELEGRAM_BOT_TOKEN, "TELEGRAM_BOT_TOKEN is missing!"
+assert ADMIN_ID, "ADMIN_ID is missing!"
+assert GROQ_API_KEY, "GROQ_API_KEY is missing!"
 
-try:
-    groq_client = Groq(api_key=GROQ_API_KEY)
-except Exception as e:
-    logger.error(f"Groq Client Init Failed: {e}")
-    groq_client = None
+# ─────────────────────────────────────────────────────────────
+# GROQ CLIENT
+# ─────────────────────────────────────────────────────────────
+groq_client = Groq(api_key=GROQ_API_KEY)
 
-GROQ_CHAT_MODEL = "openai/gpt-oss-120b"
-GROQ_VOICE_MODEL = "whisper-large-v3"
+# ─────────────────────────────────────────────────────────────
+# SYSTEM PROMPT — INFINITE CRYPTO BRAIN
+# ─────────────────────────────────────────────────────────────
+SYSTEM_PROMPT = """You are "Crypto Intel AI" — a world-class, encyclopedic crypto intelligence analyst. Your personality is elegant, professional, and precise.
 
-APPROVED_CHAT_USERS = {ADMIN_ID}
-BLOCKED_USERS = set()
-PENDING_REQUEST_USERS = set()
-APPROVED_CHANNELS = {PUBLIC_CHANNEL_ID} if PUBLIC_CHANNEL_ID else set()
-user_chat_histories = {}
-seen_news_ids = set()
-LATEST_NEWS_CACHE = []
-BINANCE_SYMBOLS = set()
+YOUR COMPLETE KNOWLEDGE DOMAIN:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1. **All Cryptocurrencies**: Bitcoin (BTC), Ethereum (ETH), every altcoin (SOL, ADA, XRP, DOGE, AVAX, DOT, MATIC, LINK, UNI, AAVE, etc.), memecoins (PEPE, SHIB, FLOKI, WIF, BONK), stablecoins (USDT, USDC, DAI), and their complete fundamentals, history, tokenomics, use-cases, founders, and roadmaps.
 
-WAITING_REJECT_TEXT = 1
+2. **Trading Expertise**: Technical Analysis (RSI, MACD, Bollinger Bands, Fibonacci, Ichimoku, EMA/SMA), chart patterns (Head & Shoulders, Double Top/Bottom, Wedges, Flags, Triangles, Cup & Handle), support/resistance levels, breakout strategies, volume analysis, funding rates, open interest, order book depth.
 
+3. **Leverage & Liquidation**: How perpetual futures work, cross vs isolated margin, liquidation mechanics, short/long squeeze dynamics, funding rate arbitrage, position sizing, risk management.
+
+4. **Exchanges & Wallets**: Complete operational knowledge of Binance, Bybit, OKX, KuCoin, Coinbase, Kraken, and DEXs (Uniswap, PancakeSwap, dYdX, GMX). How to trade, deposit, withdraw, set stop-losses, use advanced order types. Trust Wallet, MetaMask, Ledger — setup, seed phrases, network configurations.
+
+5. **On-Chain Intelligence**: Whale wallet tracking, large transfers, exchange inflows/outflows, miner behavior, staking ratios, DeFi TVL changes, NFT market dynamics.
+
+6. **Macroeconomics & Geopolitics**: Federal Reserve interest rates, CPI data, inflation metrics, USD strength (DXY), bond yields, quantitative easing/tightening, wars, sanctions, government crypto reserves (US Strategic BTC Reserve, El Salvador), regulatory actions (SEC, EU MiCA).
+
+7. **Market Psychology**: Fear & Greed Index interpretation, market cycles (accumulation, markup, distribution, markdown), retail vs institutional behavior, FOMO/FUD dynamics.
+
+STRICT DOMAIN GUARDRAIL:
+━━━━━━━━━━━━━━━━━━━━━━
+If ANY question falls outside cryptocurrency, trading, blockchain, DeFi, or related financial markets, respond EXACTLY with:
+"দুঃখিত, আমার কাছে এই ধরনের কোনো ডাটা নেই। আমি শুধুমাত্র ক্রিপ্টোকারেন্সি, ট্রেডিং ও মার্কেট সম্পর্কিত বিষয় বিশ্লেষণে সক্ষম।"
+
+RESPONSE STYLE:
+━━━━━━━━━━━━━━
+- Be thorough yet concise
+- Use data-driven analysis
+- Include relevant metrics when discussing coins
+- Structure answers with clear formatting
+- Always provide balanced perspectives (bull case + bear case)
+- Never give direct financial advice; always frame as analysis
+- Use professional, elegant tone throughout"""
+
+# ─────────────────────────────────────────────────────────────
+# NEWS ANALYSIS PROMPT
+# ─────────────────────────────────────────────────────────────
+NEWS_ANALYSIS_PROMPT = """You are a senior crypto market analyst. Analyze the following crypto news and provide a structured report.
+
+RULES:
+1. The HEADLINE must be written in beautiful, fluent Bengali (বাংলা).
+2. ALL other analysis content must be in professional English.
+3. Include the exact date and time provided.
+4. Do NOT generically say "market will go up/down". Instead, analyze the depth and real impact.
+5. For a SINGLE MEGA EVENT (war, major hack, ETF approval, country-level buy/sell), emphasize its massive impact separately.
+6. For MULTIPLE SMALL NEWS items, explain the combined cluster sentiment and overall trend.
+
+OUTPUT FORMAT (use this exact structure):
+
+📰 [Bengali Headline Here]
+
+🕐 Date & Time: {date_time}
+
+📊 **Market Impact Analysis:**
+[Detailed analysis of how this news affects the crypto market]
+
+🎯 **Affected Assets:**
+[List specific coins/tokens affected and how]
+
+📈 **Sentiment:** [Bullish 🟢 / Bearish 🔴 / Neutral 🟡]
+🔒 **Confidence Level:** [High / Medium / Low] — [percentage]%
+
+⚡ **Key Takeaway:**
+[One powerful concluding insight]
+
+━━━━━━━━━━━━━━━━━━━━━━
+🤖 Crypto Intel AI | Powered by Groq"""
+
+# ─────────────────────────────────────────────────────────────
+# LIQUIDATION ANALYSIS PROMPT
+# ─────────────────────────────────────────────────────────────
+LIQUIDATION_PROMPT = """You are analyzing a significant liquidation event in the crypto market.
+
+Analyze this liquidation data and explain what happened, why, and what traders should watch for next.
+
+OUTPUT FORMAT:
+
+🔥 [Bengali headline about the liquidation event]
+
+🕐 Time: {timestamp}
+
+💥 **Liquidation Details:**
+{details}
+
+📊 **Root Cause Analysis:**
+[Explain why this liquidation cascade happened]
+
+⚠️ **What This Means:**
+[Impact on market structure, potential follow-through]
+
+📈 **Sentiment:** [Bullish 🟢 / Bearish 🔴 / Neutral 🟡]
+
+━━━━━━━━━━━━━━━━━━━━━━
+🤖 Crypto Intel AI | Powered by Groq"""
+
+# ─────────────────────────────────────────────────────────────
+# RSS FEEDS — TOP CRYPTO NEWS SOURCES
+# ─────────────────────────────────────────────────────────────
 RSS_FEEDS = [
     "https://cointelegraph.com/rss",
     "https://www.coindesk.com/arc/outboundfeeds/rss/",
-    "https://decrypt.co/feed"
+    "https://cryptonews.com/news/feed/",
+    "https://decrypt.co/feed",
+    "https://bitcoinmagazine.com/.rss/full/",
+    "https://www.theblock.co/rss.xml",
+    "https://cryptopotato.com/feed/",
+    "https://u.today/rss",
+    "https://ambcrypto.com/feed/",
+    "https://beincrypto.com/feed/",
 ]
 
-def load_binance_symbols():
-    global BINANCE_SYMBOLS
+# ─────────────────────────────────────────────────────────────
+# IN-MEMORY STORAGE
+# ─────────────────────────────────────────────────────────────
+# User chat histories: {user_id: [{"role": ..., "content": ...}, ...]}
+user_histories: dict[int, list[dict]] = defaultdict(list)
+
+# Allowed users set
+allowed_users: set[int] = {ADMIN_ID}
+
+# Approved channels set
+approved_channels: set[int] = set()
+if PUBLIC_CHANNEL_ID:
     try:
-        url = "https://api.binance.com/api/v3/exchangeInfo"
-        data = requests.get(url, timeout=6).json()
-        for s in data.get("symbols", []):
-            if s.get("status") == "TRADING" and s.get("quoteAsset") == "USDT":
-                BINANCE_SYMBOLS.add(s["baseAsset"])
-    except Exception as e:
-        logger.error(f"Failed to load Binance symbols: {e}")
+        approved_channels.add(int(PUBLIC_CHANNEL_ID))
+    except ValueError:
+        pass
 
-load_binance_symbols()
+# Seen news hashes for deduplication
+seen_news_hashes: set[str] = set()
 
-def get_channel_english_date_str() -> str:
-    bd_tz = timezone(timedelta(hours=6))
-    now = datetime.now(bd_tz)
-    return now.strftime("%d %B %Y")
+# Pending rejection messages: {admin_msg_id: channel_id}
+pending_reject_messages: dict[int, int] = {}
 
-def get_user_current_time_str() -> str:
-    bd_tz = timezone(timedelta(hours=6))
-    now = datetime.now(bd_tz)
-    return now.strftime("%d %B %Y, %I:%M %p")
+# Previous prices for spike detection
+previous_prices: dict[str, float] = {}
 
-def format_clean_text(text: str) -> str:
-    if not text:
-        return ""
-    return text.replace("**", "").replace("*", "").strip()
+# Rate limiting for Groq
+last_groq_call: float = 0.0
+GROQ_MIN_INTERVAL = 2.0  # seconds between calls
 
-def is_pure_english(text: str) -> bool:
-    if not text:
-        return False
-    if any('\u0980' <= c <= '\u09FF' for c in text):
-        return False
-    banglish_markers = ["ami", "tumi", "kemon", "acho", "accha", "shuno", "koro", "bolo", "hobe", "bujhte", "parcho", "kto", "koto", "ki", "korbo", "kida", "kide", "banaiche"]
-    low = text.lower()
-    if any(m in low.split() for m in banglish_markers):
-        return False
-    ascii_letters = sum(1 for c in text if c.isascii() and c.isalpha())
-    return ascii_letters > (len(text) * 0.4)
+MAX_HISTORY_LENGTH = 20  # messages per user
+MAX_SEEN_NEWS = 500  # max cached news hashes
 
-def has_invalid_script(text: str) -> bool:
-    for c in text:
-        if '\u0370' <= c <= '\u03FF' or '\u1F00' <= c <= '\u1FFF':
-            return True
-    return False
 
-def get_binance_top_gainers(limit=20):
-    try:
-        url = "https://api.binance.com/api/v3/ticker/24hr"
-        res = requests.get(url, timeout=5).json()
-        usdt_pairs = [item for item in res if item['symbol'].endswith('USDT')]
-        sorted_pairs = sorted(usdt_pairs, key=lambda x: float(x['priceChangePercent']), reverse=True)
-        top_list = []
-        for p in sorted_pairs[:limit]:
-            sym = p['symbol'].replace('USDT', '')
-            change = float(p['priceChangePercent'])
-            price = float(p['lastPrice'])
-            top_list.append(f"{sym}: ${price:,.4f} (+{change:.2f}%)")
-        return "\n[BINANCE VERIFIED TOP GAINERS (LAST 24H)]:\n" + "\n".join(top_list) + "\n"
-    except Exception as e:
-        logger.error(f"Top gainers error: {e}")
-        return ""
+# ─────────────────────────────────────────────────────────────
+# UTILITY FUNCTIONS
+# ─────────────────────────────────────────────────────────────
+def news_hash(title: str, link: str) -> str:
+    """Generate unique hash for a news item."""
+    raw = f"{title.strip().lower()}|{link.strip().lower()}"
+    return hashlib.sha256(raw.encode()).hexdigest()[:16]
 
-def extract_crypto_symbol(text: str) -> str:
-    clean = text.lower().replace("?", " ").replace("/", " ").replace("-", " ")
-    aliases = {
-        "ইথুরেষাম": "ETH", "ইথেরিয়াম": "ETH", "ইথেরিয়াম": "ETH", "ইথিরিয়াম": "ETH", "ether": "ETH", "ethereum": "ETH",
-        "বিটকয়েন": "BTC", "বিটকয়েনের": "BTC", "বিটকোইন": "BTC", "bitcoin": "BTC", "btc": "BTC",
-        "সোলানা": "SOL", "সোলেয়ানা": "SOL", "solana": "SOL", "sol": "SOL",
-        "বাইনান্স": "BNB", "বিএনবি": "BNB", "bnb": "BNB",
-        "ডজ": "DOGE", "ডগকয়েন": "DOGE", "doge": "DOGE",
-        "পেপে": "PEPE", "pepe": "PEPE", "শিবা": "SHIB", "shib": "SHIB",
-        "রিপল": "XRP", "xrp": "XRP", "কার্ডানো": "ADA", "ada": "ADA",
-        "সুই": "SUI", "sui": "SUI", "নিয়ার": "NEAR", "near": "NEAR",
-        "পোলকাডট": "DOT", "dot": "DOT", "অ্যাভাক্স": "AVAX", "avax": "AVAX",
-        "পলিগন": "POL", "ম্যাটিক": "POL", "matic": "POL", "pol": "POL"
-    }
 
-    for key, sym in aliases.items():
-        if key in clean:
-            return sym
+def owner_link() -> str:
+    """Generate clickable owner link without showing raw username."""
+    if OWNER_USERNAME:
+        username = OWNER_USERNAME.lstrip("@")
+        return f'<a href="https://t.me/{username}">{html.escape(OWNER_NAME)}</a>'
+    return html.escape(OWNER_NAME)
 
-    tokens = clean.upper().split()
-    for token in tokens:
-        clean_tok = token.replace("USDT", "")
-        if clean_tok in BINANCE_SYMBOLS:
-            return clean_tok
-    return ""
 
-def get_market_data_for_query(query_text: str):
-    low = query_text.lower()
-    if any(k in low for k in ["top gainer", "sob cheye up", "সবচেয়ে বেশি আপ", "সবচেয়ে আপ", "বেশি আপ", "top coin", "টপ কয়েন", "top 20", "২০ টা কয়েন"]):
-        return get_binance_top_gainers(20)
+def truncate_history(user_id: int):
+    """Keep only last N messages per user."""
+    if len(user_histories[user_id]) > MAX_HISTORY_LENGTH:
+        user_histories[user_id] = user_histories[user_id][-MAX_HISTORY_LENGTH:]
 
-    sym = extract_crypto_symbol(query_text)
-    if sym:
-        target_symbol = f"{sym}USDT"
-        try:
-            url = f"https://api.binance.com/api/v3/ticker/24hr?symbol={target_symbol}"
-            res = requests.get(url, timeout=4).json()
-            if 'lastPrice' in res:
-                price = float(res['lastPrice'])
-                high = float(res['highPrice'])
-                low_p = float(res['lowPrice'])
-                change = float(res['priceChangePercent'])
-                return f"\n[REAL-TIME LIVE BINANCE DATA: {target_symbol} | Current Price: \({price:,.4f} | 24h High:\){high:,.4f} | 24h Low: ${low_p:,.4f} | 24h Change: {change}%]\n"
-        except Exception:
-            pass
-    return ""
 
-async def send_large_text_reply(update: Update, waiting_msg, full_text: str):
-    max_len = 3900
-    if len(full_text) <= max_len:
-        try:
-            await waiting_msg.edit_text(full_text, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
-        except Exception:
-            await waiting_msg.edit_text(full_text, disable_web_page_preview=True)
-        return
+def clean_seen_news():
+    """Prevent seen_news_hashes from growing indefinitely."""
+    global seen_news_hashes
+    if len(seen_news_hashes) > MAX_SEEN_NEWS:
+        # Keep only the most recent half
+        seen_list = list(seen_news_hashes)
+        seen_news_hashes = set(seen_list[len(seen_list) // 2:])
 
-    parts = []
-    while len(full_text) > max_len:
-        split_idx = full_text.rfind("\n\n", 0, max_len)
-        if split_idx == -1:
-            split_idx = full_text.rfind("\n", 0, max_len)
-        if split_idx == -1:
-            split_idx = max_len
-        parts.append(full_text[:split_idx].strip())
-        full_text = full_text[split_idx:].strip()
-    if full_text:
-        parts.append(full_text)
+
+async def rate_limited_groq_call(messages: list[dict], max_tokens: int = 2048) -> Optional[str]:
+    """Call Groq API with rate limiting."""
+    global last_groq_call
+
+    now = time.time()
+    elapsed = now - last_groq_call
+    if elapsed < GROQ_MIN_INTERVAL:
+        await asyncio.sleep(GROQ_MIN_INTERVAL - elapsed)
 
     try:
-        await waiting_msg.edit_text(parts[0], parse_mode=ParseMode.HTML, disable_web_page_preview=True)
-    except Exception:
-        await waiting_msg.edit_text(parts[0], disable_web_page_preview=True)
-
-    for part in parts[1:]:
-        try:
-            await update.message.reply_text(part, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
-        except Exception:
-            await update.message.reply_text(part, disable_web_page_preview=True)
-
-# -----------------------------------------------------------------------------
-# অডিও ও এআই ইঞ্জিন
-# -----------------------------------------------------------------------------
-
-def transcribe_audio_file(audio_bytes: bytes) -> str:
-    if not groq_client:
-        return ""
-
-    acoustic_prompt = (
-        "বাঙালি আঞ্চলিক উপভাষা, ইথেরিয়াম, বিটকয়েন, সোলানা, ক্যান্ডেলস্টিক, ভলিউম, "
-        "Ethereum, Bitcoin, Binance, TradingView, support, resistance, SUI, DOGE, PEPE."
-    )
-
-    try:
-        audio_file = io.BytesIO(audio_bytes)
-        audio_file.name = "voice.ogg"
-        transcription = groq_client.audio.transcriptions.create(
-            file=audio_file,
-            model=GROQ_VOICE_MODEL,
-            response_format="text",
-            prompt=acoustic_prompt
-        )
-        res_text = transcription.strip()
-
-        if has_invalid_script(res_text):
-            audio_file.seek(0)
-            retry_transcription = groq_client.audio.transcriptions.create(
-                file=audio_file,
-                model=GROQ_VOICE_MODEL,
-                response_format="text",
-                language="bn",
-                prompt="বাংলায় ক্রিপ্টো এবং সাধারণ প্রশ্ন।"
-            )
-            res_text = retry_transcription.strip()
-
-        return res_text
-    except Exception as e:
-        logger.error(f"Voice Transcription Error: {e}")
-        return ""
-
-def analyze_crypto_news(title: str, summary: str):
-    if not groq_client:
-        return None
-
-    system_prompt = (
-        "You are an institutional crypto market analyst. "
-        "Strict Formatting Rules:\n"
-        "1. ONLY the Headline line MUST be translated into a powerful, fluent, and attractive BENGALI headline.\n"
-        "2. ALL OTHER TEXT, labels, analysis, impact, and summary MUST be strictly in professional ENGLISH.\n"
-        "3. Evaluate if the news is a genuine catalyst or routine noise. Do NOT blindly label everything bullish/bearish.\n"
-        "4. Use clean, balanced emojis (🟢, 🔴, ⚪, ⚠️, 📊, 📝). Never use markdown asterisks (**).\n\n"
-        "Strict Output Format:\n"
-        "📢 [এখানে সংবাদের মূল শিরোনামের স্পষ্ট বাংলা অনুবাদ]\n\n"
-        "📊 Market Impact: [Bullish 🟢 / Bearish 🔴 / Neutral ⚪ / High Volatility ⚠️]\n"
-        "📁 Event Type: [Single Major Catalyst / Macro Regulatory / Routine Noise]\n"
-        "💡 Potential Outlook: [1-2 concise lines in English detailing price or liquidity implications]\n"
-        "📝 Key Summary: [1 concise sentence in English summarizing the core verified event]"
-    )
-    user_prompt = f"Original Title: {title}\nOriginal Summary: {summary}"
-
-    try:
+        last_groq_call = time.time()
         response = groq_client.chat.completions.create(
-            model=GROQ_CHAT_MODEL,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
-            ],
-            temperature=0.2,
-            max_tokens=350
-        )
-        return format_clean_text(response.choices[0].message.content)
-    except Exception as e:
-        logger.error(f"Groq News Analysis Error: {e}")
-        return None
-
-def analyze_user_crypto_query(user_id: int, user_text: str):
-    if not groq_client:
-        return "⚠️ এআই ত্রুটি: GROQ_API_KEY কনফিগার করা হয়নি।"
-
-    low_text = user_text.lower().replace("?", "").strip()
-    creator_queries = [
-        "কে বানিয়েছে", "কে তৈরি করেছে", "who made you", "who created you", "who is your creator",
-        "owner কে", "তৈরি কে করেছে", "কার বট", "কে বানাইসে", "কে বানাইছে", "কার তৈরি", "maker",
-        "who built you", "tuhe kisne banaya", "tumhe kisne banaya", "কেনে বানাইল", "খনে বানাইসে",
-        "tomake k baniyeche", "tomake k banise", "tomar owner k", "tomar malik k", "tomake banaiche kida", "banaiche kida"
-    ]
-    if any(q in low_text for q in creator_queries):
-        owner_html = f'[{OWNER_NAME}](https://t.me/{OWNER_USERNAME})'
-        if is_pure_english(user_text):
-            return f"I was created by {owner_html}."
-        elif "kida" in low_text or "kide" in low_text:
-            return f"আঁরে বানাইয়ে {owner_html}।"
-        else:
-            return f"আমাকে তৈরি করেছেন {owner_html}।"
-
-    greetings_map = {
-        "hi": "Hello! How can I assist you with crypto, technical analysis, or markets today?",
-        "hello": "Hello! How can I assist you with crypto, technical analysis, or markets today?",
-        "হাই": "হ্যালো! ক্রিপ্টো মার্কেট, ক্যান্ডেলস্টিক বা চার্ট নিয়ে আপনাকে কীভাবে সাহায্য করতে পারি?",
-        "হ্যালো": "হ্যালো! ক্রিপ্টো মার্কেট, ক্যান্ডেলস্টিক বা চার্ট নিয়ে আপনাকে কীভাবে সাহায্য করতে পারি?",
-        "কেমন আছো": "আমি ভালো আছি, ধন্যবাদ! আপনার ট্রেডিং কেমন চলছে?",
-        "kemon acho": "আমি ভালো আছি, ধন্যবাদ! আপনার ট্রেডিং কেমন চলছে?",
-        "tumi kemon acho": "আমি চমৎকার আছি! আপনার ক্রিপ্টো সংক্রান্ত কোনো আপডেট লাগবে?",
-        "tumi ki amar kotha bujhte parcho": "হ্যাঁ, আমি আপনার কথা পুরোপুরি বুঝতে পারছি। ক্রিপ্টো মার্কেট বা চার্ট নিয়ে যেকোনো প্রশ্ন করুন।"
-    }
-    for g_key, g_reply in greetings_map.items():
-        if g_key in low_text:
-            return g_reply
-
-    market_data = get_market_data_for_query(user_text)
-    history = user_chat_histories.get(user_id, [])
-    current_time_str = get_user_current_time_str()
-
-    recent_news_context = ""
-    if market_data and LATEST_NEWS_CACHE:
-        recent_news_context = "\n[LIVE BREAKING NEWS HAPPENING RIGHT NOW]:\n" + "\n".join(
-            [f"- {n['title']}: {n['summary'][:150]}..." for n in LATEST_NEWS_CACHE[:2]]
-        ) + "\n"
-
-    system_instruction = (
-        f"You are the Ultimate Real-Time Crypto Intelligence, Technical Analyst & Educational Brain. Current Live Date/Time: {current_time_str}.\n"
-        f"Creator Info: You were created by {OWNER_NAME} (Telegram: https://t.me/{OWNER_USERNAME}).\n\n"
-        "ENCYCLOPEDIC CRYPTO KNOWLEDGE BASE:\n"
-        "1. Technical Analysis & Price Action: Comprehensive mastery of Candlestick patterns (Doji, Hammer, Engulfing, Morning/Evening Star, Three White Soldiers), Smart Money Concepts (SMC, Order Blocks, Liquidity Sweeps, Fair Value Gap / FVG, Break of Structure / BOS, Change of Character / CHoCH).\n"
-        "2. Indicators & Volume: Relative Strength Index (RSI Divergences), MACD, Bollinger Bands, Moving Averages (EMA 20, 50, 100, 200), Fibonacci Retracements/Extensions, Cumulative Volume Delta (CVD), Volume Spread Analysis (VSA), Open Interest (OI), Funding Rates, Liquidation Heatmaps.\n"
-        "3. Market Cap & Indices: TOTAL (Total Crypto Cap), TOTAL2 (ex-BTC), TOTAL3 (Altcoin Market Cap ex-BTC & ETH), BTC Dominance (BTC.D), USDT Dominance (USDT.D), FDV (Fully Diluted Valuation), Tokenomics, and Whale On-chain Flow.\n"
-        "4. Exchanges & Practical Trading: Spot Trading, Futures Trading (Leverage, Cross/Isolated Margin, Long/Short liquidation management, Stop-Loss/Take-Profit) across Binance, Bybit, Bitget, KuCoin, MEXC, OKX, and DEXs (Uniswap, Raydium).\n"
-        "5. Real-Time Data Handling: When [BINANCE VERIFIED TOP GAINERS] or [REAL-TIME LIVE BINANCE DATA] is provided, you have full live market feed access! Never say you lack live data. Directly present the live figures.\n"
-        "6. Language & Dialects: Romanized Bengali (Banglish) is strictly Bengali. Match the user's language and regional dialect. Never use Devanagari Hindi for Banglish.\n"
-        "7. Tone: Direct, expert, concise, authoritative, and completely free of markdown asterisks (**)."
-    )
-
-    messages = [{"role": "system", "content": system_instruction}]
-    for h in history[-3:]:
-        messages.append({"role": h["role"], "content": h["text"]})
-
-    current_content = f"{market_data}{recent_news_context}\nUser Input: {user_text}"
-    messages.append({"role": "user", "content": current_content})
-
-    try:
-        response = groq_client.chat.completions.create(
-            model=GROQ_CHAT_MODEL,
+            model="llama-3.3-70b-versatile",
             messages=messages,
-            temperature=0.2,
-            max_tokens=850
+            temperature=0.7,
+            max_tokens=max_tokens,
+            top_p=0.9,
         )
-        reply = format_clean_text(response.choices[0].message.content)
-        history.append({"role": "user", "text": user_text})
-        history.append({"role": "assistant", "text": reply})
-        user_chat_histories[user_id] = history
-        return reply
+        return response.choices[0].message.content
     except Exception as e:
-        logger.error(f"Groq Chat Error: {e}")
-        return f"⚠️ Error: {str(e)[:120]}"
+        logger.error(f"Groq API error: {e}")
+        return None
 
-# -----------------------------------------------------------------------------
-# অ্যাডমিন প্যানেল ও ইউজার ব্লক/আনব্লক ম্যানেজমেন্ট
-# -----------------------------------------------------------------------------
 
-async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
-        await update.message.reply_text("⛔ আপনি বটের মূল অ্যাডমিন নন।")
-        return
+def is_crypto_related(text: str) -> bool:
+    """Quick heuristic check if text might be crypto-related."""
+    crypto_keywords = [
+        "bitcoin", "btc", "ethereum", "eth", "crypto", "blockchain", "defi",
+        "nft", "token", "coin", "altcoin", "trading", "exchange", "wallet",
+        "binance", "bybit", "okx", "kucoin", "coinbase", "uniswap",
+        "pancakeswap", "metamask", "trust wallet", "ledger", "staking",
+        "yield", "liquidity", "airdrop", "ico", "ido", "launchpad",
+        "bull", "bear", "long", "short", "leverage", "margin", "futures",
+        "perpetual", "funding rate", "liquidation", "rsi", "macd",
+        "bollinger", "fibonacci", "support", "resistance", "breakout",
+        "whale", "on-chain", "halving", "mining", "pow", "pos",
+        "solana", "sol", "cardano", "ada", "xrp", "ripple", "doge",
+        "dogecoin", "shib", "pepe", "avax", "avalanche", "polygon",
+        "matic", "link", "chainlink", "dot", "polkadot", "uni",
+        "aave", "compound", "maker", "dai", "usdt", "usdc", "tether",
+        "stable", "meme", "floki", "bonk", "wif", "bnb", "ton",
+        "tron", "trx", "near", "apt", "aptos", "sui", "arb", "arbitrum",
+        "op", "optimism", "layer", "l1", "l2", "rollup", "zk",
+        "sec", "etf", "regulation", "fed", "interest rate", "cpi",
+        "inflation", "dxy", "dollar", "macro", "geopolit",
+        "কয়েন", "ক্রিপ্টো", "বিটকয়েন", "ইথেরিয়াম", "ট্রেডিং",
+        "এক্সচেঞ্জ", "ওয়ালেট", "মার্কেট", "বাজার", "লিকুইডেশন",
+        "chart", "candle", "volume", "order", "stop loss", "take profit",
+        "dca", "hodl", "fomo", "fud", "fear", "greed", "market cap",
+        "dominance", "gas fee", "gwei", "smart contract", "dapp",
+    ]
+    text_lower = text.lower()
+    return any(kw in text_lower for kw in crypto_keywords)
 
-    current_time_str = get_user_current_time_str()
-    channels_list = "\n".join([f"• {c}" for c in APPROVED_CHANNELS if c]) or "None"
 
-    panel_text = (
-        "👑 **Admin Control Dashboard**\n"
-        f"📅 Date: {current_time_str}\n"
-        "━━━━━━━━━━━━━━━━━━\n\n"
-        f"📢 **Approved Channels:**\n{channels_list}\n\n"
-        "👥 **User Management:**\nনিচে অনুমোদিত ইউজারদের ব্লক বা আনব্লক করতে বাটনে চাপুন:"
-    )
-
-    keyboard = []
-    for uid in list(APPROVED_CHAT_USERS):
-        if uid == ADMIN_ID:
-            continue
-        keyboard.append([
-            InlineKeyboardButton(f"🚫 Block {uid}", callback_data=f"user_block_{uid}")
-        ])
-
-    for b_uid in list(BLOCKED_USERS):
-        keyboard.append([
-            InlineKeyboardButton(f"✅ Unblock {b_uid}", callback_data=f"user_unblock_{b_uid}")
-        ])
-
-    if not keyboard:
-        keyboard = [[InlineKeyboardButton("ℹ️ কোনো সাধারণ ইউজার নেই", callback_data="none")]]
-
-    await update.message.reply_text(panel_text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(keyboard))
-
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ─────────────────────────────────────────────────────────────
+# COMMAND HANDLERS
+# ─────────────────────────────────────────────────────────────
+async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /start command with permission check."""
     user = update.effective_user
+    user_id = user.id
+    chat_type = update.effective_chat.type
 
-    if user.id in BLOCKED_USERS:
-        await update.message.reply_text("🚫 দুঃখিত, আপনাকে এই বট থেকে ব্লক করা হয়েছে।")
+    # Only handle in private chat
+    if chat_type != ChatType.PRIVATE:
         return
 
-    if user.id in APPROVED_CHAT_USERS:
-        await update.message.reply_text(
-            f"স্বাগতম {user.first_name}! আমি আপনার সর্বজনীন ক্রিপ্টো, ট্রেডিং ও টেকনিক্যাল এআই।\n"
-            "ক্যান্ডেলস্টিক, ভলিউম, চার্ট প্যাটার্ন, টপ গেইনার বা ফিউচার ট্রেডিং নিয়ে যেকোনো প্রশ্ন করতে পারেন।"
+    if user_id in allowed_users:
+        welcome = (
+            f"🌟 <b>Welcome back, {html.escape(user.first_name)}!</b>\n\n"
+            "I'm your <b>Crypto Intelligence AI</b> — a living encyclopedia of the crypto world.\n\n"
+            "💡 <b>What I can do:</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━━\n"
+            "📊 Deep analysis of any coin, token, or project\n"
+            "📈 Technical analysis & chart pattern insights\n"
+            "🏦 Exchange & wallet guidance (Binance, Bybit, MetaMask...)\n"
+            "🐋 Whale movement & on-chain intelligence\n"
+            "🌍 Macro & geopolitical impact on crypto\n"
+            "🔥 Real-time liquidation & price spike alerts\n\n"
+            "Simply type your question and I'll analyze it for you.\n\n"
+            "━━━━━━━━━━━━━━━━━━━━━\n"
+            f"🤖 <i>Powered by Groq AI | Owner: {owner_link()}</i>"
         )
+        await update.message.reply_text(welcome, parse_mode=ParseMode.HTML)
     else:
-        if user.id in PENDING_REQUEST_USERS:
-            await update.message.reply_text("⏳ আপনার এক্সেস রিকোয়েস্ট ইতিমধ্যে বিবেচনাধীন রয়েছে। অনুগ্রহ করে অপেক্ষা করুন।")
-            return
-
-        PENDING_REQUEST_USERS.add(user.id)
-        await update.message.reply_text("⛔ আপনি অনুমোদিত ইউজার নন। অ্যাডমিনের কাছে এক্সেস রিকোয়েস্ট পাঠানো হয়েছে।")
-        
-        keyboard = [[
-            InlineKeyboardButton("✅ Confirm", callback_data=f"user_confirm_{user.id}"),
-            InlineKeyboardButton("❌ Reject", callback_data=f"user_reject_{user.id}")
-        ]]
-        await context.bot.send_message(
-            chat_id=ADMIN_ID,
-            text=f"👤 New Access Request\nUser: @{user.username} (ID: {user.id})\nName: {user.full_name}",
-            reply_markup=InlineKeyboardMarkup(keyboard)
+        # Access denied — notify user
+        denied_msg = (
+            "🔒 <b>Access Denied</b>\n\n"
+            "You are not authorized to use this bot.\n"
+            "Your access request has been sent to the administrator.\n"
+            "Please wait for approval.\n\n"
+            f"🤖 <i>Crypto Intel AI | Owner: {owner_link()}</i>"
         )
+        await update.message.reply_text(denied_msg, parse_mode=ParseMode.HTML)
 
-async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
+        # Send approval request to admin
+        user_mention = f'<a href="tg://user?id={user_id}">{html.escape(user.first_name)}</a>'
+        username_info = f" (@{user.username})" if user.username else ""
 
-    if user.id in BLOCKED_USERS:
-        await update.message.reply_text("🚫 আপনি এই বটের এক্সেস থেকে ব্লকড রয়েছেন।")
-        return
-
-    if user.id not in APPROVED_CHAT_USERS:
-        if user.id in PENDING_REQUEST_USERS:
-            await update.message.reply_text("⏳ আপনার রিকোয়েস্ট বিবেচনাধীন রয়েছে।")
-        else:
-            await start_command(update, context)
-        return
-
-    user_query = update.message.text
-    if is_pure_english(user_query):
-        wait_text = "🔍 Analyzing live market..."
-    else:
-        wait_text = "🔍 লাইভ মার্কেট ও টেকনিক্যাল চার্ট যাচাই করছি..."
-
-    waiting_msg = await update.message.reply_text(wait_text)
-    reply_text = analyze_user_crypto_query(user.id, user_query)
-    await send_large_text_reply(update, waiting_msg, reply_text)
-
-async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-
-    if user.id in BLOCKED_USERS:
-        await update.message.reply_text("🚫 আপনি এই বটের এক্সেস থেকে ব্লকড রয়েছেন।")
-        return
-
-    if user.id not in APPROVED_CHAT_USERS:
-        if user.id in PENDING_REQUEST_USERS:
-            await update.message.reply_text("⏳ আপনার রিকোয়েস্ট বিবেচনাধীন রয়েছে।")
-        else:
-            await start_command(update, context)
-        return
-
-    voice = update.message.voice or update.message.audio
-    if not voice:
-        return
-
-    waiting_msg = await update.message.reply_text("🎙️ ভয়েস শুনছি...")
-
-    try:
-        tg_file = await context.bot.get_file(voice.file_id)
-        audio_stream = io.BytesIO()
-        await tg_file.download_to_memory(audio_stream)
-        audio_bytes = audio_stream.getvalue()
-
-        transcribed_text = transcribe_audio_file(audio_bytes)
-        if not transcribed_text:
-            await waiting_msg.edit_text("⚠️ কথাটি পরিষ্কারভাবে শোনা যায়নি। অনুগ্রহ করে আবার বলুন।")
-            return
-
-        is_eng = is_pure_english(transcribed_text)
-        if is_eng:
-            header = f"🗣️ Your voice: \"{transcribed_text}\"\n\n"
-        else:
-            header = f"🗣️ আপনার কথা: \"{transcribed_text}\"\n\n"
-
-        reply_text = analyze_user_crypto_query(user.id, transcribed_text)
-        await send_large_text_reply(update, waiting_msg, f"{header}{reply_text}")
-    except Exception as e:
-        logger.error(f"Voice Handle Error: {e}")
-        await waiting_msg.edit_text(f"⚠️ Error: {str(e)[:100]}")
-
-async def handle_bot_channel_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    result = update.my_chat_member
-    if not result:
-        return
-    chat = result.chat
-    new_status = result.new_chat_member.status
-    added_by = result.from_user
-
-    if new_status in ["administrator", "member"]:
-        if chat.id not in APPROVED_CHANNELS and str(chat.id) != str(PUBLIC_CHANNEL_ID):
-            keyboard = [[
-                InlineKeyboardButton("✅ Approve Channel", callback_data=f"chnl_approve_{chat.id}"),
-                InlineKeyboardButton("❌ Reject & Leave", callback_data=f"chnl_reject_{chat.id}")
-            ]]
+        admin_msg = (
+            f"🔔 <b>New Access Request</b>\n\n"
+            f"👤 User: {user_mention}{username_info}\n"
+            f"🆔 ID: <code>{user_id}</code>\n\n"
+            "Grant this user access to the personal chatbot?"
+        )
+        keyboard = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("✅ Allow Chat", callback_data=f"allow_user:{user_id}"),
+                InlineKeyboardButton("❌ Deny", callback_data=f"deny_user:{user_id}"),
+            ]
+        ])
+        try:
             await context.bot.send_message(
                 chat_id=ADMIN_ID,
-                text=(
-                    f"📢 New Channel Alert!\n"
-                    f"Channel: {chat.title} (ID: {chat.id})\n"
-                    f"Added By: @{added_by.username} (ID: {added_by.id})\n\n"
-                    "Approve this channel for broadcasts?"
-                ),
-                reply_markup=InlineKeyboardMarkup(keyboard)
-            )
-
-async def handle_button_actions(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    data = query.data
-
-    if data.startswith("user_confirm_"):
-        uid = int(data.split("_")[2])
-        APPROVED_CHAT_USERS.add(uid)
-        PENDING_REQUEST_USERS.discard(uid)
-        BLOCKED_USERS.discard(uid)
-        await query.edit_message_text(f"✅ User {uid} approved successfully.")
-        try:
-            await context.bot.send_message(chat_id=uid, text="🎉 অ্যাডমিন আপনার এক্সেস অনুমোদন করেছেন! এখন থেকে আপনি বট ব্যবহার করতে পারেন।")
-        except Exception:
-            pass
-
-    elif data.startswith("user_reject_"):
-        uid = int(data.split("_")[2])
-        PENDING_REQUEST_USERS.discard(uid)
-        await query.edit_message_text(f"❌ User {uid} rejected. (Status reset: User can re-apply).")
-        try:
-            await context.bot.send_message(chat_id=uid, text="⛔ দুঃখিত, আপনার এক্সেস রিকোয়েস্ট বাতিল করা হয়েছে।")
-        except Exception:
-            pass
-
-    elif data.startswith("user_block_"):
-        uid = int(data.split("_")[2])
-        APPROVED_CHAT_USERS.discard(uid)
-        BLOCKED_USERS.add(uid)
-        await query.edit_message_text(f"🚫 User {uid} has been BLOCKED. They cannot use the bot.")
-        try:
-            await context.bot.send_message(chat_id=uid, text="🚫 আপনার এক্সেস অ্যাডমিন কর্তৃক ব্লক করা হয়েছে।")
-        except Exception:
-            pass
-
-    elif data.startswith("user_unblock_"):
-        uid = int(data.split("_")[2])
-        BLOCKED_USERS.discard(uid)
-        APPROVED_CHAT_USERS.add(uid)
-        await query.edit_message_text(f"✅ User {uid} has been UNBLOCKED and approved.")
-        try:
-            await context.bot.send_message(chat_id=uid, text="🎉 আপনাকে আনব্লক করা হয়েছে! এখন পুনরায় বট ব্যবহার করতে পারেন।")
-        except Exception:
-            pass
-
-    elif data.startswith("chnl_approve_"):
-        cid = int(data.split("_")[2])
-        APPROVED_CHANNELS.add(cid)
-        await query.edit_message_text(f"✅ Channel {cid} approved (silently active).")
-
-    elif data.startswith("chnl_reject_"):
-        cid = int(data.split("_")[2])
-        context.user_data['target_channel_to_leave'] = cid
-        await query.edit_message_text("❌ Channel rejected. Enter custom leave message:")
-        return WAITING_REJECT_TEXT
-
-    return ConversationHandler.END
-
-async def receive_custom_leave_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    custom_text = update.message.text
-    target_channel_id = context.user_data.get('target_channel_to_leave')
-
-    if target_channel_id:
-        owner_html = f'[{OWNER_NAME}](https://t.me/{OWNER_USERNAME})'
-        final_msg = (
-            f"{format_clean_text(custom_text)}\n\n"
-            f"━━━━━━━━━━━━━━━━━━\n"
-            f"Owner: {owner_html}"
-        )
-        try:
-            await context.bot.send_message(
-                chat_id=target_channel_id,
-                text=final_msg,
+                text=admin_msg,
                 parse_mode=ParseMode.HTML,
-                disable_web_page_preview=True
+                reply_markup=keyboard,
             )
         except Exception as e:
-            logger.error(f"Leave send error: {e}")
+            logger.error(f"Failed to send access request to admin: {e}")
 
-        try:
-            await context.bot.leave_chat(chat_id=target_channel_id)
-            await update.message.reply_text("🚀 Bot has left the channel.")
-        except Exception as e:
-            await update.message.reply_text(f"⚠️ Error leaving: {e}")
 
-        context.user_data.pop('target_channel_to_leave', None)
+async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show bot status (admin only)."""
+    if update.effective_user.id != ADMIN_ID:
+        return
 
-    return ConversationHandler.END
+    status_text = (
+        "📊 <b>Bot Status Report</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━\n"
+        f"👥 Allowed Users: <code>{len(allowed_users)}</code>\n"
+        f"📢 Approved Channels: <code>{len(approved_channels)}</code>\n"
+        f"📰 Cached News Hashes: <code>{len(seen_news_hashes)}</code>\n"
+        f"💬 Active Chat Sessions: <code>{len(user_histories)}</code>\n"
+        f"📡 RSS Feeds Monitored: <code>{len(RSS_FEEDS)}</code>\n"
+        f"🕐 Server Time: <code>{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}</code>\n"
+        "━━━━━━━━━━━━━━━━━━━━━\n"
+        "🤖 <i>All systems operational</i>"
+    )
+    await update.message.reply_text(status_text, parse_mode=ParseMode.HTML)
 
-# -----------------------------------------------------------------------------
-# ব্যাকগ্রাউন্ড স্ক্যানার
-# -----------------------------------------------------------------------------
 
-async def background_market_scanner(app):
-    global LATEST_NEWS_CACHE
-    await asyncio.sleep(5)
-    logger.info("Market scanner active. Monitoring feeds...")
+async def cmd_clear(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Clear chat history for the user."""
+    user_id = update.effective_user.id
+    if user_id not in allowed_users:
+        return
 
-    initial_count = 0
-    for feed_url in RSS_FEEDS:
-        if initial_count >= 5:
-            break
-        try:
-            feed = feedparser.parse(feed_url)
-            for entry in feed.entries[:3]:
-                if initial_count >= 5:
-                    break
-                nid = entry.get("id", entry.link)
-                if nid not in seen_news_ids:
-                    seen_news_ids.add(nid)
-                    title = entry.title
-                    summary = entry.get("summary", "")
-                    link = entry.link
-
-                    LATEST_NEWS_CACHE.insert(0, {"title": title, "summary": summary})
-                    LATEST_NEWS_CACHE = LATEST_NEWS_CACHE[:10]
-
-                    analysis = analyze_crypto_news(title, summary)
-                    if not analysis:
-                        analysis = (
-                            f"📢 {title}\n\n"
-                            f"📊 Market Impact: Neutral ⚪\n"
-                            f"📁 Event Type: Routine News\n"
-                            f"💡 Potential Outlook: Market stability expected.\n"
-                            f"📝 Key Summary: General crypto sector update."
-                        )
-
-                    channel_date = get_channel_english_date_str()
-                    broadcast_text = (
-                        f"📰 Breaking News Update\n"
-                        f"📅 {channel_date}\n\n"
-                        f"{analysis}\n\n"
-                        f"🔗 Source: {link}\n"
-                        f"━━━━━━━━━━━━━━━━━━\n"
-                        f"Automated Crypto Intelligence"
-                    )
-
-                    for ch_id in list(APPROVED_CHANNELS):
-                        try:
-                            await app.bot.send_message(
-                                chat_id=ch_id,
-                                text=broadcast_text,
-                                disable_web_page_preview=True
-                            )
-                            initial_count += 1
-                            await asyncio.sleep(2)
-                        except Exception as ex:
-                            logger.error(f"Broadcast error: {ex}")
-        except Exception as e:
-            logger.error(f"Feed error: {e}")
-
-    while True:
-        try:
-            for feed_url in RSS_FEEDS:
-                feed = feedparser.parse(feed_url)
-                for entry in feed.entries[:3]:
-                    nid = entry.get("id", entry.link)
-                    if nid not in seen_news_ids:
-                        seen_news_ids.add(nid)
-                        title = entry.title
-                        summary = entry.get("summary", "")
-                        link = entry.link
-
-                        LATEST_NEWS_CACHE.insert(0, {"title": title, "summary": summary})
-                        LATEST_NEWS_CACHE = LATEST_NEWS_CACHE[:10]
-
-                        analysis = analyze_crypto_news(title, summary)
-                        if not analysis:
-                            analysis = (
-                                f"📢 {title}\n\n"
-                                f"📊 Market Impact: Neutral ⚪\n"
-                                f"📁 Event Type: Routine News\n"
-                                f"💡 Potential Outlook: Market stability expected.\n"
-                                f"📝 Key Summary: General crypto sector update."
-                            )
-
-                        channel_date = get_channel_english_date_str()
-                        broadcast_text = (
-                            f"📰 Breaking News Update\n"
-                            f"📅 {channel_date}\n\n"
-                            f"{analysis}\n\n"
-                            f"🔗 Source: {link}\n"
-                            f"━━━━━━━━━━━━━━━━━━\n"
-                            f"Automated Crypto Intelligence"
-                        )
-
-                        for ch_id in list(APPROVED_CHANNELS):
-                            try:
-                                await app.bot.send_message(
-                                    chat_id=ch_id,
-                                    text=broadcast_text,
-                                    disable_web_page_preview=True
-                                )
-                            except Exception as ex:
-                                logger.error(f"Loop dispatch error: {ex}")
-                        await asyncio.sleep(3)
-        except Exception as e:
-            logger.error(f"Loop error: {e}")
-
-        await asyncio.sleep(300)
-
-# -----------------------------------------------------------------------------
-# মেইন অ্যাপ
-# -----------------------------------------------------------------------------
-
-def main():
-    app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
-
-    reject_conv = ConversationHandler(
-        entry_points=[CallbackQueryHandler(handle_button_actions, pattern="^chnl_reject_")],
-        states={
-            WAITING_REJECT_TEXT: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_custom_leave_message)]
-        },
-        fallbacks=[]
+    user_histories[user_id] = []
+    await update.message.reply_text(
+        "🗑️ <b>Chat history cleared.</b>\n"
+        "Your conversation has been reset. Feel free to start fresh!",
+        parse_mode=ParseMode.HTML,
     )
 
-    app.add_handler(reject_conv)
-    app.add_handler(CommandHandler("start", start_command))
-    app.add_handler(CommandHandler("admin", admin_panel))
-    app.add_handler(CallbackQueryHandler(handle_button_actions))
-    app.add_handler(ChatMemberHandler(handle_bot_channel_add, ChatMemberHandler.MY_CHAT_MEMBER))
-    app.add_handler(MessageHandler(filters.ChatType.PRIVATE & filters.TEXT & ~filters.COMMAND, handle_private_message))
-    app.add_handler(MessageHandler(filters.ChatType.PRIVATE & (filters.VOICE | filters.AUDIO), handle_voice_message))
 
-    loop = asyncio.get_event_loop()
-    loop.create_task(background_market_scanner(app))
+async def cmd_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """List allowed users (admin only)."""
+    if update.effective_user.id != ADMIN_ID:
+        return
 
-    logger.info("Bot is active with Complete Institutional Technical Brain & User Ban System...")
-    app.run_polling()
+    if not allowed_users:
+        await update.message.reply_text("No allowed users.")
+        return
+
+    lines = ["👥 <b>Allowed Users:</b>\n━━━━━━━━━━━━━━━━━━"]
+    for uid in allowed_users:
+        tag = " 👑 (Admin)" if uid == ADMIN_ID else ""
+        lines.append(f"• <code>{uid}</code>{tag}")
+    lines.append(f"\nTotal: {len(allowed_users)}")
+
+    await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
+
+
+# ─────────────────────────────────────────────────────────────
+# CALLBACK QUERY HANDLER
+# ─────────────────────────────────────────────────────────────
+async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle inline button callbacks."""
+    query = update.callback_query
+    await query.answer()
+
+    if query.from_user.id != ADMIN_ID:
+        await query.answer("⛔ Only the admin can perform this action.", show_alert=True)
+        return
+
+    data = query.data
+
+    # ── Allow/Deny User ──────────────────────────────────
+    if data.startswith("allow_user:"):
+        user_id = int(data.split(":")[1])
+        allowed_users.add(user_id)
+
+        await query.edit_message_text(
+            f"✅ <b>User Approved</b>\n\n"
+            f"🆔 User <code>{user_id}</code> now has chat access.",
+            parse_mode=ParseMode.HTML,
+        )
+
+        # Notify the user
+        try:
+            await context.bot.send_message(
+                chat_id=user_id,
+                text=(
+                    "🎉 <b>Access Granted!</b>\n\n"
+                    "Your request has been approved by the administrator.\n"
+                    "You can now chat with me about anything crypto-related!\n\n"
+                    "Simply type your question to get started.\n\n"
+                    f"🤖 <i>Crypto Intel AI | Owner: {owner_link()}</i>"
+                ),
+                parse_mode=ParseMode.HTML,
+            )
+        except Exception as e:
+            logger.error(f"Failed to notify user {user_id}: {e}")
+
+    elif data.startswith("deny_user:"):
+        user_id = int(data.split(":")[1])
+        allowed_users.discard(user_id)
+
+        await query.edit_message_text(
+            f"❌ <b>User Denied</b>\n\n"
+            f"🆔 User <code>{user_id}</code> was not granted access.",
+            parse_mode=ParseMode.HTML,
+        )
+
+        try:
+            await context.bot.send_message(
+                chat_id=user_id,
+                text=(
+                    "❌ <b>Access Denied</b>\n\n"
+                    "Your access request was not approved.\n"
+                    "Contact the bot owner for more information.\n\n"
+                    f"🤖 <i>Crypto Intel AI | Owner: {owner_link()}</i>"
+                ),
+                parse_mode=ParseMode.HTML,
+            )
+        except Exception:
+            pass
+
+    # ── Approve/Reject Channel ──────────────────────────
+    elif data.startswith("approve_channel:"):
+        channel_id = int(data.split(":")[1])
+        approved_channels.add(channel_id)
+
+        await query.edit_message_text(
+            f"✅ <b>Channel Approved</b>\n\n"
+            f"📢 Channel <code>{channel_id}</code> is now active.\n"
+            f"Bot will silently serve this channel (no welcome message).",
+            parse_mode=ParseMode.HTML,
+        )
+
+    elif data.startswith("reject_channel:"):
+        channel_id = int(data.split(":")[1])
+
+        # Ask admin for custom leave message
+        pending_reject_messages[ADMIN_ID] = channel_id
+        context.user_data["awaiting_reject_msg"] = channel_id
+
+        await query.edit_message_text(
+            f"📝 <b>Custom Leave Message</b>\n\n"
+            f"Channel: <code>{channel_id}</code>\n\n"
+            f"Please type the message you want to post in the channel before leaving.\n"
+            f"(Your message will automatically include the owner signature)",
+            parse_mode=ParseMode.HTML,
+        )
+
+
+# ─────────────────────────────────────────────────────────────
+# MESSAGE HANDLER — PERSONAL CHATBOT
+# ─────────────────────────────────────────────────────────────
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle private messages — personal AI analyst."""
+    if not update.message or not update.message.text:
+        return
+
+    user = update.effective_user
+    user_id = user.id
+    chat_type = update.effective_chat.type
+    text = update.message.text.strip()
+
+    # Only handle private messages
+    if chat_type != ChatType.PRIVATE:
+        return
+
+    # Check if admin is providing a rejection message
+    if user_id == ADMIN_ID and "awaiting_reject_msg" in context.user_data:
+        channel_id = context.user_data.pop("awaiting_reject_msg")
+        pending_reject_messages.pop(ADMIN_ID, None)
+
+        # Build the leave message with owner signature
+        leave_message = (
+            f"{text}\n\n"
+            f"━━━━━━━━━━━━━━━━━━━━━\n"
+            f"Owner: {owner_link()}"
+        )
+
+        try:
+            # Post message in the channel
+            await context.bot.send_message(
+                chat_id=channel_id,
+                text=leave_message,
+                parse_mode=ParseMode.HTML,
+            )
+            # Leave the channel
+            await context.bot.leave_chat(channel_id)
+
+            await update.message.reply_text(
+                f"✅ <b>Done!</b>\n\n"
+                f"Message posted and bot left channel <code>{channel_id}</code>.",
+                parse_mode=ParseMode.HTML,
+            )
+        except Exception as e:
+            logger.error(f"Failed to post leave message or leave channel {channel_id}: {e}")
+            await update.message.reply_text(
+                f"⚠️ Error: Could not complete the action.\n<code>{html.escape(str(e))}</code>",
+                parse_mode=ParseMode.HTML,
+            )
+        return
+
+    # Check permission
+    if user_id not in allowed_users:
+        await update.message.reply_text(
+            "🔒 <b>Access Denied</b>\n\n"
+            "You don't have permission to chat with me.\n"
+            "Use /start to request access.\n\n"
+            f"🤖 <i>Crypto Intel AI | Owner: {owner_link()}</i>",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    # Show typing action
+    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
+
+    # Build conversation messages
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+
+    # Add user's chat history (isolated per user)
+    messages.extend(user_histories[user_id])
+
+    # Add current message
+    messages.append({"role": "user", "content": text})
+
+    # Call Groq AI
+    response_text = await rate_limited_groq_call(messages, max_tokens=3000)
+
+    if response_text:
+        # Save to history
+        user_histories[user_id].append({"role": "user", "content": text})
+        user_histories[user_id].append({"role": "assistant", "content": response_text})
+        truncate_history(user_id)
+
+        # Send response (handle long messages)
+        if len(response_text) > 4000:
+            # Split into chunks
+            chunks = [response_text[i:i + 4000] for i in range(0, len(response_text), 4000)]
+            for chunk in chunks:
+                try:
+                    await update.message.reply_text(chunk, parse_mode=ParseMode.HTML)
+                except Exception:
+                    await update.message.reply_text(chunk)
+        else:
+            try:
+                await update.message.reply_text(response_text, parse_mode=ParseMode.HTML)
+            except Exception:
+                # If HTML parsing fails, send as plain text
+                await update.message.reply_text(response_text)
+    else:
+        await update.message.reply_text(
+            "⚠️ <b>Temporary Issue</b>\n\n"
+            "I'm experiencing a brief connectivity issue with my AI engine.\n"
+            "Please try again in a moment.\n\n"
+            f"🤖 <i>Crypto Intel AI</i>",
+            parse_mode=ParseMode.HTML,
+        )
+
+
+# ─────────────────────────────────────────────────────────────
+# CHAT MEMBER HANDLER — CHANNEL ADD/REMOVE DETECTION
+# ─────────────────────────────────────────────────────────────
+async def bot_added_to_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Detect when bot is added to a channel/group."""
+    my_chat_member = update.my_chat_member
+    if not my_chat_member:
+        return
+
+    chat = my_chat_member.chat
+    new_status = my_chat_member.new_chat_member.status
+    old_status = my_chat_member.old_chat_member.status
+
+    # Bot was added as admin/member
+    if new_status in (ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.MEMBER):
+        if old_status in (ChatMemberStatus.LEFT, ChatMemberStatus.BANNED, None):
+            chat_id = chat.id
+            chat_title = chat.title or "Unknown"
+
+            # Check if already approved
+            if chat_id in approved_channels:
+                logger.info(f"Bot added to already-approved channel: {chat_title} ({chat_id})")
+                return
+
+            # Not approved — alert admin
+            logger.info(f"Bot added to unapproved channel: {chat_title} ({chat_id})")
+
+            added_by = my_chat_member.from_user
+            added_by_info = ""
+            if added_by:
+                added_by_mention = f'<a href="tg://user?id={added_by.id}">{html.escape(added_by.first_name)}</a>'
+                username_info = f" (@{added_by.username})" if added_by.username else ""
+                added_by_info = f"\n👤 Added by: {added_by_mention}{username_info}"
+
+            alert_msg = (
+                f"⚠️ <b>Unauthorized Channel Alert</b>\n\n"
+                f"📢 Channel: <b>{html.escape(chat_title)}</b>\n"
+                f"🆔 ID: <code>{chat_id}</code>"
+                f"{added_by_info}\n\n"
+                f"The bot was added to this channel but it's not approved.\n"
+                f"What would you like to do?"
+            )
+            keyboard = InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("✅ Approve Channel", callback_data=f"approve_channel:{chat_id}"),
+                    InlineKeyboardButton("❌ Reject & Leave", callback_data=f"reject_channel:{chat_id}"),
+                ]
+            ])
+
+            try:
+                await context.bot.send_message(
+                    chat_id=ADMIN_ID,
+                    text=alert_msg,
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=keyboard,
+                )
+            except Exception as e:
+                logger.error(f"Failed to alert admin about channel add: {e}")
+
+
+# ─────────────────────────────────────────────────────────────
+# NEWS MONITORING — RSS FEEDS
+# ─────────────────────────────────────────────────────────────
+async def fetch_and_analyze_news(context: ContextTypes.DEFAULT_TYPE):
+    """Fetch RSS feeds, analyze with Groq, broadcast to channel."""
+    if not PUBLIC_CHANNEL_ID:
+        return
+
+    try:
+        channel_id = int(PUBLIC_CHANNEL_ID)
+    except ValueError:
+        channel_id = PUBLIC_CHANNEL_ID  # Handle @channel_username format
+
+    if channel_id not in approved_channels and not isinstance(channel_id, str):
+        return
+
+    logger.info("Starting news fetch cycle...")
+    new_articles = []
+
+    for feed_url in RSS_FEEDS:
+        try:
+            feed = await asyncio.get_event_loop().run_in_executor(
+                None, feedparser.parse, feed_url
+            )
+
+            for entry in feed.entries[:5]:  # Latest 5 per feed
+                title = entry.get("title", "").strip()
+                link = entry.get("link", "").strip()
+                summary = entry.get("summary", entry.get("description", "")).strip()
+                published = entry.get("published", entry.get("updated", ""))
+
+                if not title:
+                    continue
+
+                h = news_hash(title, link)
+                if h in seen_news_hashes:
+                    continue
+
+                seen_news_hashes.add(h)
+                new_articles.append({
+                    "title": title,
+                    "link": link,
+                    "summary": summary[:500],
+                    "published": published,
+                    "source": feed_url.split("/")[2],
+                })
+
+        except Exception as e:
+            logger.warning(f"Failed to fetch {feed_url}: {e}")
+            continue
+
+    clean_seen_news()
+
+    if not new_articles:
+        logger.info("No new articles found this cycle.")
+        return
+
+    logger.info(f"Found {len(new_articles)} new articles. Analyzing...")
+
+    # Process articles (batch similar ones, or individual for major events)
+    # Group by time proximity for cluster analysis
+    if len(new_articles) >= 3:
+        # Cluster analysis — multiple news items
+        combined_news = "\n\n".join([
+            f"📌 {a['title']}\n   Source: {a['source']}\n   Published: {a['published']}\n   Summary: {a['summary']}"
+            for a in new_articles[:8]  # Max 8 for context window
+        ])
+
+        now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        messages = [
+            {"role": "system", "content": NEWS_ANALYSIS_PROMPT},
+            {"role": "user", "content": (
+                f"Current time: {now_str}\n\n"
+                f"Multiple crypto news items detected. Analyze the CLUSTER SENTIMENT:\n\n"
+                f"{combined_news}\n\n"
+                f"Provide a combined analysis showing the overall market trend from these news items."
+            )}
+        ]
+
+        analysis = await rate_limited_groq_call(messages, max_tokens=2500)
+        if analysis:
+            try:
+                await context.bot.send_message(
+                    chat_id=channel_id,
+                    text=analysis,
+                    parse_mode=ParseMode.HTML,
+                    disable_web_page_preview=True,
+                )
+            except Exception:
+                try:
+                    await context.bot.send_message(
+                        chat_id=channel_id,
+                        text=analysis,
+                        disable_web_page_preview=True,
+                    )
+                except Exception as e:
+                    logger.error(f"Failed to send cluster analysis: {e}")
+
+    else:
+        # Individual analysis for each article
+        for article in new_articles:
+            now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+            messages = [
+                {"role": "system", "content": NEWS_ANALYSIS_PROMPT},
+                {"role": "user", "content": (
+                    f"Current time: {now_str}\n\n"
+                    f"News Title: {article['title']}\n"
+                    f"Source: {article['source']}\n"
+                    f"Published: {article['published']}\n"
+                    f"Summary: {article['summary']}\n"
+                    f"Link: {article['link']}\n\n"
+                    f"Analyze this single news item thoroughly."
+                )}
+            ]
+
+            analysis = await rate_limited_groq_call(messages, max_tokens=2000)
+            if analysis:
+                try:
+                    await context.bot.send_message(
+                        chat_id=channel_id,
+                        text=analysis,
+                        parse_mode=ParseMode.HTML,
+                        disable_web_page_preview=True,
+                    )
+                except Exception:
+                    try:
+                        await context.bot.send_message(
+                            chat_id=channel_id,
+                            text=analysis,
+                            disable_web_page_preview=True,
+                        )
+                    except Exception as e:
+                        logger.error(f"Failed to send analysis: {e}")
+
+                await asyncio.sleep(3)  # Avoid flooding
+
+
+# ─────────────────────────────────────────────────────────────
+# MARKET MONITORING — BINANCE VIA CCXT
+# ─────────────────────────────────────────────────────────────
+MONITORED_SYMBOLS = [
+    "BTC/USDT", "ETH/USDT", "SOL/USDT", "XRP/USDT", "DOGE/USDT",
+    "ADA/USDT", "AVAX/USDT", "DOT/USDT", "LINK/USDT", "MATIC/USDT",
+    "BNB/USDT", "TON/USDT", "NEAR/USDT", "APT/USDT", "SUI/USDT",
+    "ARB/USDT", "OP/USDT", "PEPE/USDT", "SHIB/USDT", "WIF/USDT",
+]
+
+PRICE_SPIKE_THRESHOLD = 5.0  # 5% price change triggers alert
+LARGE_LIQUIDATION_THRESHOLD = 1_000_000  # $1M+ liquidation alert
+
+
+async def monitor_market(context: ContextTypes.DEFAULT_TYPE):
+    """Monitor Binance for price spikes and anomalies."""
+    if not PUBLIC_CHANNEL_ID:
+        return
+
+    try:
+        channel_id = int(PUBLIC_CHANNEL_ID)
+    except ValueError:
+        channel_id = PUBLIC_CHANNEL_ID
+
+    exchange = ccxt.binance({
+        "enableRateLimit": True,
+        "options": {"defaultType": "future"},
+    })
+
+    try:
+        tickers = await exchange.fetch_tickers(MONITORED_SYMBOLS)
+
+        alerts = []
+
+        for symbol, ticker in tickers.items():
+            current_price = ticker.get("last", 0)
+            price_change_pct = ticker.get("percentage", 0)
+            volume_24h = ticker.get("quoteVolume", 0)
+
+            if not current_price:
+                continue
+
+            prev_price = previous_prices.get(symbol)
+
+            # Check for sudden spike (compared to our own tracking)
+            if prev_price and prev_price > 0:
+                our_change_pct = ((current_price - prev_price) / prev_price) * 100
+                if abs(our_change_pct) >= PRICE_SPIKE_THRESHOLD:
+                    direction = "📈 SURGE" if our_change_pct > 0 else "📉 CRASH"
+                    alerts.append({
+                        "symbol": symbol,
+                        "direction": direction,
+                        "change_pct": our_change_pct,
+                        "current_price": current_price,
+                        "prev_price": prev_price,
+                        "volume_24h": volume_24h,
+                        "exchange_24h_change": price_change_pct,
+                    })
+
+            # Also check 24h change from exchange
+            elif price_change_pct and abs(price_change_pct) >= 8:
+                direction = "📈 SURGE" if price_change_pct > 0 else "📉 CRASH"
+                alerts.append({
+                    "symbol": symbol,
+                    "direction": direction,
+                    "change_pct": price_change_pct,
+                    "current_price": current_price,
+                    "prev_price": prev_price or current_price,
+                    "volume_24h": volume_24h,
+                    "exchange_24h_change": price_change_pct,
+                })
+
+            previous_prices[symbol] = current_price
+
+        await exchange.close()
+
+        if alerts:
+            for alert in alerts[:3]:  # Max 3 alerts per cycle
+                await process_price_alert(context, channel_id, alert)
+
+    except Exception as e:
+        logger.error(f"Market monitoring error: {e}")
+        try:
+            await exchange.close()
+        except Exception:
+            pass
+
+
+async def process_price_alert(context, channel_id, alert: dict):
+    """Analyze and broadcast a price alert."""
+    now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+    alert_text = (
+        f"Symbol: {alert['symbol']}\n"
+        f"Direction: {alert['direction']}\n"
+        f"Change: {alert['change_pct']:.2f}%\n"
+        f"Current Price: ${alert['current_price']:,.4f}\n"
+        f"24h Volume: ${alert['volume_24h']:,.0f}\n"
+        f"24h Exchange Change: {alert.get('exchange_24h_change', 'N/A')}%"
+    )
+
+    messages = [
+        {"role": "system", "content": LIQUIDATION_PROMPT.replace("{timestamp}", now_str)},
+        {"role": "user", "content": (
+            f"Time: {now_str}\n\n"
+            f"SUDDEN PRICE MOVEMENT DETECTED:\n\n"
+            f"{alert_text}\n\n"
+            f"Analyze why this sudden {alert['direction'].split()[1].lower()} might have occurred. "
+            f"Consider recent market events, whale activity, liquidation cascades, or breaking news. "
+            f"Provide the analysis in the structured format."
+        )}
+    ]
+
+    analysis = await rate_limited_groq_call(messages, max_tokens=2000)
+    if analysis:
+        try:
+            await context.bot.send_message(
+                chat_id=channel_id,
+                text=analysis,
+                parse_mode=ParseMode.HTML,
+            )
+        except Exception:
+            try:
+                await context.bot.send_message(
+                    chat_id=channel_id,
+                    text=analysis,
+                )
+            except Exception as e:
+                logger.error(f"Failed to send price alert: {e}")
+
+
+async def monitor_liquidations(context: ContextTypes.DEFAULT_TYPE):
+    """Monitor for large liquidation events via Binance futures."""
+    if not PUBLIC_CHANNEL_ID:
+        return
+
+    try:
+        channel_id = int(PUBLIC_CHANNEL_ID)
+    except ValueError:
+        channel_id = PUBLIC_CHANNEL_ID
+
+    exchange = ccxt.binance({
+        "enableRateLimit": True,
+        "options": {"defaultType": "future"},
+    })
+
+    try:
+        # Fetch recent trades for major pairs to detect liquidation-like activity
+        # Using funding rate as a proxy for squeeze detection
+        funding_alerts = []
+
+        for symbol in ["BTC/USDT", "ETH/USDT", "SOL/USDT"]:
+            try:
+                funding = await exchange.fetch_funding_rate(symbol)
+                rate = funding.get("fundingRate", 0)
+
+                if rate and abs(rate) > 0.001:  # Extreme funding rate (>0.1%)
+                    direction = "Long-heavy (Short Squeeze risk)" if rate > 0 else "Short-heavy (Long Squeeze risk)"
+                    funding_alerts.append({
+                        "symbol": symbol,
+                        "rate": rate,
+                        "direction": direction,
+                    })
+            except Exception:
+                continue
+
+        await exchange.close()
+
+        if funding_alerts:
+            now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+            details = "\n".join([
+                f"• {fa['symbol']}: Funding Rate {fa['rate']*100:.4f}% → {fa['direction']}"
+                for fa in funding_alerts
+            ])
+
+            messages = [
+                {"role": "system", "content": LIQUIDATION_PROMPT.replace("{timestamp}", now_str).replace("{details}", details)},
+                {"role": "user", "content": (
+                    f"Time: {now_str}\n\n"
+                    f"EXTREME FUNDING RATE DETECTED — Possible Squeeze:\n\n"
+                    f"{details}\n\n"
+                    f"Analyze the liquidation/squeeze risk and market implications."
+                )}
+            ]
+
+            analysis = await rate_limited_groq_call(messages, max_tokens=2000)
+            if analysis:
+                try:
+                    await context.bot.send_message(
+                        chat_id=channel_id,
+                        text=analysis,
+                        parse_mode=ParseMode.HTML,
+                    )
+                except Exception:
+                    try:
+                        await context.bot.send_message(
+                            chat_id=channel_id,
+                            text=analysis,
+                        )
+                    except Exception as e:
+                        logger.error(f"Failed to send liquidation alert: {e}")
+
+    except Exception as e:
+        logger.error(f"Liquidation monitoring error: {e}")
+        try:
+            await exchange.close()
+        except Exception:
+            pass
+
+
+# ─────────────────────────────────────────────────────────────
+# ERROR HANDLER
+# ─────────────────────────────────────────────────────────────
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
+    """Handle errors gracefully."""
+    logger.error(f"Exception while handling an update: {context.error}")
+
+    if update and isinstance(update, Update) and update.effective_message:
+        try:
+            await update.effective_message.reply_text(
+                "⚠️ An unexpected error occurred. Please try again.",
+            )
+        except Exception:
+            pass
+
+
+# ─────────────────────────────────────────────────────────────
+# POST-INIT — SET BOT COMMANDS
+# ─────────────────────────────────────────────────────────────
+async def post_init(application: Application):
+    """Set bot commands after initialization."""
+    commands = [
+        BotCommand("start", "Start the bot / Request access"),
+        BotCommand("clear", "Clear your chat history"),
+        BotCommand("status", "Bot status (Admin only)"),
+        BotCommand("users", "List allowed users (Admin only)"),
+    ]
+    await application.bot.set_my_commands(commands)
+    logger.info("Bot commands set successfully.")
+
+    # Notify admin
+    try:
+        await application.bot.send_message(
+            chat_id=ADMIN_ID,
+            text=(
+                "🟢 <b>Crypto Intel Bot is now ONLINE!</b>\n\n"
+                "━━━━━━━━━━━━━━━━━━━━━\n"
+                "📊 All monitoring systems active\n"
+                "📰 News feed scanner: ✅\n"
+                "📈 Market monitor: ✅\n"
+                "🔥 Liquidation tracker: ✅\n"
+                "💬 Personal chatbot: ✅\n"
+                "━━━━━━━━━━━━━━━━━━━━━\n"
+                f"🕐 {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}"
+            ),
+            parse_mode=ParseMode.HTML,
+        )
+    except Exception as e:
+        logger.error(f"Failed to send startup notification: {e}")
+
+
+# ─────────────────────────────────────────────────────────────
+# SCHEDULER SETUP
+# ─────────────────────────────────────────────────────────────
+def setup_scheduler(application: Application):
+    """Configure background job scheduling."""
+    job_queue = application.job_queue
+
+    # News monitoring — every 10 minutes
+    job_queue.run_repeating(
+        fetch_and_analyze_news,
+        interval=600,  # 10 minutes
+        first=30,  # Start 30 seconds after boot
+        name="news_monitor",
+    )
+
+    # Market price monitoring — every 5 minutes
+    job_queue.run_repeating(
+        monitor_market,
+        interval=300,  # 5 minutes
+        first=15,
+        name="market_monitor",
+    )
+
+    # Liquidation/funding rate monitoring — every 15 minutes
+    job_queue.run_repeating(
+        monitor_liquidations,
+        interval=900,  # 15 minutes
+        first=45,
+        name="liquidation_monitor",
+    )
+
+    logger.info("Background schedulers configured successfully.")
+
+
+# ─────────────────────────────────────────────────────────────
+# MAIN — APPLICATION SETUP & LAUNCH
+# ─────────────────────────────────────────────────────────────
+def main():
+    """Initialize and run the bot."""
+    logger.info("═" * 60)
+    logger.info("  CRYPTO INTELLIGENCE TELEGRAM BOT v2.0")
+    logger.info("  Starting up...")
+    logger.info("═" * 60)
+
+    # Build application
+    application = (
+        Application.builder()
+        .token(TELEGRAM_BOT_TOKEN)
+        .post_init(post_init)
+        .read_timeout(30)
+        .write_timeout(30)
+        .connect_timeout(30)
+        .build()
+    )
+
+    # ── Register Handlers ──────────────────────────────────
+    # Commands
+    application.add_handler(CommandHandler("start", cmd_start))
+    application.add_handler(CommandHandler("clear", cmd_clear))
+    application.add_handler(CommandHandler("status", cmd_status))
+    application.add_handler(CommandHandler("users", cmd_users))
+
+    # Callback queries (inline buttons)
+    application.add_handler(CallbackQueryHandler(callback_handler))
+
+    # Chat member updates (bot added to channel/group)
+    application.add_handler(
+        ChatMemberHandler(bot_added_to_channel, ChatMemberHandler.MY_CHAT_MEMBER)
+    )
+
+    # Private messages (personal chatbot) — must be last
+    application.add_handler(
+        MessageHandler(
+            filters.TEXT & filters.ChatType.PRIVATE & ~filters.COMMAND,
+            handle_message,
+        )
+    )
+
+    # Error handler
+    application.add_error_handler(error_handler)
+
+    # ── Setup Background Jobs ──────────────────────────────
+    setup_scheduler(application)
+
+    # ── Start Polling ──────────────────────────────────────
+    logger.info("Bot is now polling for updates...")
+    application.run_polling(
+        allowed_updates=[
+            Update.MESSAGE,
+            Update.CALLBACK_QUERY,
+            Update.MY_CHAT_MEMBER,
+            Update.CHAT_MEMBER,
+        ],
+        drop_pending_updates=True,
+    )
+
 
 if __name__ == "__main__":
     main()
