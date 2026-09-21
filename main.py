@@ -26,7 +26,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# রেলওয়ে এনভায়রনমেন্ট ভ্যারিয়েবল
+# এনভায়রনমেন্ট ভ্যারিয়েবল
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0").strip())
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
@@ -34,7 +34,6 @@ PUBLIC_CHANNEL_ID = os.getenv("PUBLIC_CHANNEL_ID", "").strip()
 OWNER_NAME = os.getenv("OWNER_NAME", "Admin").strip()
 OWNER_USERNAME = os.getenv("OWNER_USERNAME", "").strip()
 
-# Groq ক্লায়েন্ট ইনিশিয়ালাইজেশন
 try:
     groq_client = Groq(api_key=GROQ_API_KEY)
 except Exception as e:
@@ -48,7 +47,6 @@ seen_news_ids = set()
 
 WAITING_REJECT_TEXT = 1
 
-# তাজা ও ব্রেকিং ক্রিপ্টো আরএসএস ফিডস
 RSS_FEEDS = [
     "https://cointelegraph.com/rss",
     "https://www.coindesk.com/arc/outboundfeeds/rss/",
@@ -56,14 +54,11 @@ RSS_FEEDS = [
 ]
 
 def format_clean_text(text: str) -> str:
-    """স্টারচিহ্ন এবং অপ্রয়োজনীয় মার্কডাউন দূর করা"""
     if not text:
         return ""
-    clean = text.replace("**", "").replace("*", "")
-    return clean.strip()
+    return text.replace("**", "").replace("*", "").strip()
 
 def get_binance_live_price(symbol="BTCUSDT"):
-    """বাইন্যান্স থেকে সরাসরি বর্তমান লাইভ মার্কেট ডাটা"""
     try:
         url = f"https://api.binance.com/api/v3/ticker/24hr?symbol={symbol}"
         res = requests.get(url, timeout=5).json()
@@ -77,7 +72,7 @@ def get_binance_live_price(symbol="BTCUSDT"):
         return ""
 
 # -----------------------------------------------------------------------------
-# Groq AI ইঞ্জিন (Llama-3.3-70b-versatile)
+# Groq AI ইঞ্জিন (সক্রিয় ও স্থায়ী মডেলসমূহ)
 # -----------------------------------------------------------------------------
 
 def analyze_crypto_news(title: str, summary: str):
@@ -85,35 +80,36 @@ def analyze_crypto_news(title: str, summary: str):
         return None
 
     system_prompt = (
-        "You are an elite crypto market analyst. Analyze the given news headline and summary. "
-        "Output strictly in Bengali with clean formatting (no asterisks). "
+        "You are an elite crypto market analyst. Analyze the given news. "
+        "Output strictly in Bengali without asterisks. "
         "Format:\n"
-        "মার্কেট ইমপ্যাক্ট: [বুলিশ / বেয়ারিশ / নিউট্রাল / চরম ভোলাটাইল]\n"
+        "মার্কেট ইমপ্যাক্ট: [বুলিশ / বেয়ারিশ / নিউট্রাল]\n"
         "সম্ভাব্য প্রভাব: [১-২ লাইনে মূল প্রভাব]\n"
         "সারসংক্ষেপ: [১ লাইনে মূল খবর]"
     )
     user_prompt = f"Headline: {title}\nSummary: {summary}"
 
-    try:
-        response = groq_client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
-            ],
-            temperature=0.3,
-            max_tokens=250
-        )
-        return format_clean_text(response.choices[0].message.content)
-    except Exception as e:
-        logger.error(f"Groq News Error: {e}")
-        return None
+    models = ["llama-3.1-70b-versatile", "llama-3.1-8b-instant", "llama3-70b-8192", "llama3-8b-8192"]
+    for model_name in models:
+        try:
+            response = groq_client.chat.completions.create(
+                model=model_name,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt}
+                ],
+                temperature=0.3,
+                max_tokens=250
+            )
+            return format_clean_text(response.choices[0].message.content)
+        except Exception:
+            continue
+    return None
 
 def analyze_user_crypto_query(user_id: int, user_text: str):
     if not groq_client:
         return "⚠️ এআই ত্রুটি: GROQ_API_KEY সেট করা হয়নি।"
 
-    # লাইভ প্রাইস ডাটা আনা
     live_data = ""
     upper_query = user_text.upper()
     if any(k in upper_query for k in ["BTC", "BITCOIN"]) or "বিটকয়েন" in user_text:
@@ -126,12 +122,11 @@ def analyze_user_crypto_query(user_id: int, user_text: str):
     history = user_chat_histories.get(user_id, [])
 
     system_instruction = (
-        "You are an expert AI Crypto & Macroeconomic Market Analyst. "
-        "Strictly answer ONLY questions regarding cryptocurrencies, blockchain, market support/resistance, "
-        "whale movements, and financial/macro trends. "
-        "Always calculate realistic support/resistance levels based on the live Binance data provided. "
-        "Respond in fluent, clear Bengali without messy asterisks or broken markdown. "
-        "If unrelated questions are asked, strictly reply: 'দুঃখিত, আমি শুধুমাত্র ক্রিপ্টোকারেন্সি ও মার্কেট সম্পর্কিত বিষয় বিশ্লেষণে সক্ষম।'"
+        "You are an expert AI Crypto Analyst. "
+        "Strictly answer only regarding cryptocurrencies, support/resistance, and macroeconomics. "
+        "Use the provided live Binance market data to calculate real levels. "
+        "Write in fluent, professional Bengali without asterisks. "
+        "If unrelated questions are asked, strictly reply: 'দুঃখিত, আমি শুধুমাত্র ক্রিপ্টো সম্পর্কিত প্রশ্নের উত্তর দিতে পারি।'"
     )
 
     messages = [{"role": "system", "content": system_instruction}]
@@ -141,30 +136,34 @@ def analyze_user_crypto_query(user_id: int, user_text: str):
     current_content = f"{live_data}\nইউজার প্রশ্ন: {user_text}"
     messages.append({"role": "user", "content": current_content})
 
-    try:
-        response = groq_client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            messages=messages,
-            temperature=0.4,
-            max_tokens=700
-        )
-        reply = format_clean_text(response.choices[0].message.content)
+    models = ["llama-3.1-70b-versatile", "llama-3.1-8b-instant", "llama3-70b-8192", "llama3-8b-8192"]
+    last_err = ""
+    for model_name in models:
+        try:
+            response = groq_client.chat.completions.create(
+                model=model_name,
+                messages=messages,
+                temperature=0.4,
+                max_tokens=700
+            )
+            reply = format_clean_text(response.choices[0].message.content)
+            history.append({"role": "user", "text": user_text})
+            history.append({"role": "assistant", "text": reply})
+            user_chat_histories[user_id] = history
+            return reply
+        except Exception as e:
+            last_err = str(e)
+            continue
 
-        history.append({"role": "user", "text": user_text})
-        history.append({"role": "assistant", "text": reply})
-        user_chat_histories[user_id] = history
-        return reply
-    except Exception as e:
-        logger.error(f"Groq Chat Error: {e}")
-        return f"⚠️ এআই সার্ভার ত্রুটি: {str(e)[:120]}"
+    return f"⚠️ এআই ত্রুটি: {last_err[:120]}"
 
 # -----------------------------------------------------------------------------
-# অ্যাডমিন ড্যাশবোর্ড ও বট কমান্ড
+# টেলিগ্রাম হ্যান্ডলার
 # -----------------------------------------------------------------------------
 
 async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
-        await update.message.reply_text("⛔ আপনি এই বটের মূল অ্যাডমিন নন।")
+        await update.message.reply_text("⛔ আপনি বটের মূল অ্যাডমিন নন।")
         return
 
     users_list = "\n".join([f"• {u}" for u in APPROVED_CHAT_USERS]) or "কোনো ইউজার নেই"
@@ -182,8 +181,8 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if user.id in APPROVED_CHAT_USERS:
         await update.message.reply_text(
-            f"স্বাগতম {user.first_name}! আমি আপনার পার্সোনাল ক্রিপ্টো ইন্টেলিজেন্স এআই।\n"
-            "মার্কেট সাপোর্ট, রেজিস্ট্যান্স, বর্তমান বিটকয়েন মুভমেন্ট বা অন-চেইন তথ্য নিয়ে প্রশ্ন করতে পারেন।"
+            f"স্বাগতম {user.first_name}! আমি আপনার ক্রিপ্টো ইন্টেলিজেন্স এআই।\n"
+            "মার্কেট সাপোর্ট, রেজিস্ট্যান্স বা বর্তমান অবস্থা নিয়ে যেকোনো প্রশ্ন করতে পারেন।"
         )
     else:
         await update.message.reply_text("⛔ আপনি অনুমোদিত ইউজার নন। অ্যাডমিনের কাছে এক্সেস রিকোয়েস্ট পাঠানো হয়েছে।")
@@ -229,7 +228,7 @@ async def handle_bot_channel_add(update: Update, context: ContextTypes.DEFAULT_T
                     f"📢 New Channel Alert!\n"
                     f"চ্যানেল: {chat.title} (ID: {chat.id})\n"
                     f"অ্যাড করেছে: @{added_by.username} (ID: {added_by.id})\n\n"
-                    "আপনি কি অনুমোদন করবেন?"
+                    "অনুমোদন দিতে চান?"
                 ),
                 reply_markup=InlineKeyboardMarkup(keyboard)
             )
@@ -244,7 +243,7 @@ async def handle_button_actions(update: Update, context: ContextTypes.DEFAULT_TY
         APPROVED_CHAT_USERS.add(uid)
         await query.edit_message_text(f"✅ ইউজার {uid} সফলভাবে অনুমোদিত।")
         try:
-            await context.bot.send_message(chat_id=uid, text="🎉 অ্যাডমিন আপনার চ্যাট রিকোয়েস্ট অনুমোদন করেছেন!")
+            await context.bot.send_message(chat_id=uid, text="🎉 অ্যাডমিন আপনার রিকোয়েস্ট অনুমোদন করেছেন!")
         except Exception:
             pass
 
@@ -255,7 +254,7 @@ async def handle_button_actions(update: Update, context: ContextTypes.DEFAULT_TY
     elif data.startswith("chnl_approve_"):
         cid = int(data.split("_")[2])
         APPROVED_CHANNELS.add(cid)
-        await query.edit_message_text(f"✅ চ্যানেল {cid} অনুমোদিত হয়েছে (সাইলেন্টলি সক্রিয়)।")
+        await query.edit_message_text(f"✅ চ্যানেল {cid} অনুমোদিত হয়েছে।")
 
     elif data.startswith("chnl_reject_"):
         cid = int(data.split("_")[2])
@@ -271,7 +270,7 @@ async def receive_custom_leave_message(update: Update, context: ContextTypes.DEF
 
     if target_channel_id:
         final_msg = (
-            f"{custom_text}\n\n"
+            f"{format_clean_text(custom_text)}\n\n"
             f"━━━━━━━━━━━━━━━━━━\n"
             f"Owner: https://t.me/{OWNER_USERNAME} ({OWNER_NAME})"
         )
@@ -286,24 +285,23 @@ async def receive_custom_leave_message(update: Update, context: ContextTypes.DEF
 
         try:
             await context.bot.leave_chat(chat_id=target_channel_id)
-            await update.message.reply_text("🚀 মেসেজ পোস্ট করে বট চ্যানেল থেকে লিভ নিয়েছে!")
+            await update.message.reply_text("🚀 মেসেজ পোস্ট করে বট চ্যানেল থেকে বের হয়ে গেছে!")
         except Exception as e:
-            await update.message.reply_text(f"⚠️ লিভ নিতে সমস্যা: {e}")
+            await update.message.reply_text(f"⚠️ বের হতে সমস্যা: {e}")
 
         context.user_data.pop('target_channel_to_leave', None)
 
     return ConversationHandler.END
 
 # -----------------------------------------------------------------------------
-# ব্যাকগ্রাউন্ড স্ক্যানার (তাজা লাইভ নিউজ সম্প্রচার)
+# ব্যাকগ্রাউন্ড স্ক্যানার
 # -----------------------------------------------------------------------------
 
 async def background_market_scanner(app):
     await asyncio.sleep(5)
-    logger.info("Market scanner active. Sending initial fresh feeds...")
+    logger.info("Market scanner active. Processing fresh feeds...")
 
     initial_count = 0
-    # শুরুতেই টাটকা ৫টি ব্রেকিং নিউজ সংগ্রহ ও এআই বিশ্লেষণ
     for feed_url in RSS_FEEDS:
         if initial_count >= 5:
             break
@@ -342,11 +340,10 @@ async def background_market_scanner(app):
                             initial_count += 1
                             await asyncio.sleep(2)
                         except Exception as ex:
-                            logger.error(f"Channel broadcast error: {ex}")
+                            logger.error(f"Broadcast error: {ex}")
         except Exception as e:
-            logger.error(f"Initial feed error: {e}")
+            logger.error(f"Feed error: {e}")
 
-    # এরপর প্রতি ৫ মিনিট অন্তর স্ক্যান চলবে
     while True:
         try:
             for feed_url in RSS_FEEDS:
@@ -380,16 +377,12 @@ async def background_market_scanner(app):
                                     disable_web_page_preview=True
                                 )
                             except Exception as ex:
-                                logger.error(f"Broadcast error: {ex}")
+                                logger.error(f"Loop dispatch error: {ex}")
                         await asyncio.sleep(3)
         except Exception as e:
-            logger.error(f"Scanner loop error: {e}")
+            logger.error(f"Loop error: {e}")
 
         await asyncio.sleep(300)
-
-# -----------------------------------------------------------------------------
-# মেইন অ্যাপ
-# -----------------------------------------------------------------------------
 
 def main():
     app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
@@ -412,7 +405,7 @@ def main():
     loop = asyncio.get_event_loop()
     loop.create_task(background_market_scanner(app))
 
-    logger.info("Bot is active with Groq AI...")
+    logger.info("Bot is listening on verified models...")
     app.run_polling()
 
 if __name__ == "__main__":
