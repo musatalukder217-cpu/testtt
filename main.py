@@ -2,7 +2,6 @@ import os
 import io
 import asyncio
 import logging
-import difflib
 from datetime import datetime, timezone, timedelta
 import feedparser
 import requests
@@ -48,6 +47,7 @@ GROQ_CHAT_MODEL = "openai/gpt-oss-120b"
 GROQ_VOICE_MODEL = "whisper-large-v3"
 
 APPROVED_CHAT_USERS = {ADMIN_ID}
+BLOCKED_USERS = set()
 PENDING_REQUEST_USERS = set()
 APPROVED_CHANNELS = {PUBLIC_CHANNEL_ID} if PUBLIC_CHANNEL_ID else set()
 user_chat_histories = {}
@@ -64,7 +64,6 @@ RSS_FEEDS = [
 ]
 
 def load_binance_symbols():
-    """বট চালুর সময় বাইন্যান্সের সব কয়েন লোড করা"""
     global BINANCE_SYMBOLS
     try:
         url = "https://api.binance.com/api/v3/exchangeInfo"
@@ -72,7 +71,6 @@ def load_binance_symbols():
         for s in data.get("symbols", []):
             if s.get("status") == "TRADING" and s.get("quoteAsset") == "USDT":
                 BINANCE_SYMBOLS.add(s["baseAsset"])
-        logger.info(f"Loaded {len(BINANCE_SYMBOLS)} crypto symbols from Binance.")
     except Exception as e:
         logger.error(f"Failed to load Binance symbols: {e}")
 
@@ -98,7 +96,7 @@ def is_pure_english(text: str) -> bool:
         return False
     if any('\u0980' <= c <= '\u09FF' for c in text):
         return False
-    banglish_markers = ["ami", "tumi", "kemon", "acho", "accha", "shuno", "koro", "bolo", "hobe", "bujhte", "parcho", "kto", "koto", "ki", "korbo"]
+    banglish_markers = ["ami", "tumi", "kemon", "acho", "accha", "shuno", "koro", "bolo", "hobe", "bujhte", "parcho", "kto", "koto", "ki", "korbo", "kida", "kide", "banaiche"]
     low = text.lower()
     if any(m in low.split() for m in banglish_markers):
         return False
@@ -111,11 +109,25 @@ def has_invalid_script(text: str) -> bool:
             return True
     return False
 
-def extract_crypto_symbol(text: str) -> str:
-    """উচ্চারণ বা ভাঙা বানান থেকে কয়েন খুঁজে বের করার স্মার্ট ইঞ্জিন"""
-    clean = text.lower().replace("?", " ").replace("/", " ").replace("-", " ")
+def get_binance_top_gainers(limit=20):
+    try:
+        url = "https://api.binance.com/api/v3/ticker/24hr"
+        res = requests.get(url, timeout=5).json()
+        usdt_pairs = [item for item in res if item['symbol'].endswith('USDT')]
+        sorted_pairs = sorted(usdt_pairs, key=lambda x: float(x['priceChangePercent']), reverse=True)
+        top_list = []
+        for p in sorted_pairs[:limit]:
+            sym = p['symbol'].replace('USDT', '')
+            change = float(p['priceChangePercent'])
+            price = float(p['lastPrice'])
+            top_list.append(f"{sym}: ${price:,.4f} (+{change:.2f}%)")
+        return "\n[BINANCE VERIFIED TOP GAINERS (LAST 24H)]:\n" + "\n".join(top_list) + "\n"
+    except Exception as e:
+        logger.error(f"Top gainers error: {e}")
+        return ""
 
-    # বাংলা ফনেটিক এবং ভাঙা শব্দের সরাসরি ম্যাপিং
+def extract_crypto_symbol(text: str) -> str:
+    clean = text.lower().replace("?", " ").replace("/", " ").replace("-", " ")
     aliases = {
         "ইথুরেষাম": "ETH", "ইথেরিয়াম": "ETH", "ইথেরিয়াম": "ETH", "ইথিরিয়াম": "ETH", "ether": "ETH", "ethereum": "ETH",
         "বিটকয়েন": "BTC", "বিটকয়েনের": "BTC", "বিটকোইন": "BTC", "bitcoin": "BTC", "btc": "BTC",
@@ -133,41 +145,39 @@ def extract_crypto_symbol(text: str) -> str:
         if key in clean:
             return sym
 
-    # ইংরেজি সিম্বল বা ট্রেডিংভিউ টিকার খোঁজা
     tokens = clean.upper().split()
     for token in tokens:
         clean_tok = token.replace("USDT", "")
         if clean_tok in BINANCE_SYMBOLS:
             return clean_tok
-
     return ""
 
-def get_binance_live_price(query_text: str):
-    """যেকোনো কয়েনের জন্য ১০০% রিয়েল-টাইম লাইভ ডাটা সংগ্রহ"""
-    sym = extract_crypto_symbol(query_text)
-    if not sym:
-        return ""
+def get_market_data_for_query(query_text: str):
+    low = query_text.lower()
+    if any(k in low for k in ["top gainer", "sob cheye up", "সবচেয়ে বেশি আপ", "সবচেয়ে আপ", "বেশি আপ", "top coin", "টপ কয়েন", "top 20", "২০ টা কয়েন"]):
+        return get_binance_top_gainers(20)
 
-    target_symbol = f"{sym}USDT"
-    try:
-        url = f"https://api.binance.com/api/v3/ticker/24hr?symbol={target_symbol}"
-        res = requests.get(url, timeout=4).json()
-        if 'lastPrice' in res:
-            price = float(res['lastPrice'])
-            high = float(res['highPrice'])
-            low = float(res['lowPrice'])
-            change = float(res['priceChangePercent'])
-            return f"\n[REAL-TIME LIVE BINANCE DATA: {target_symbol} | Current Price: \({price:,.4f} | 24h High:\){high:,.4f} | 24h Low: ${low:,.4f} | 24h Change: {change}%]\n"
-        return ""
-    except Exception as e:
-        logger.error(f"Binance price error: {e}")
-        return ""
+    sym = extract_crypto_symbol(query_text)
+    if sym:
+        target_symbol = f"{sym}USDT"
+        try:
+            url = f"https://api.binance.com/api/v3/ticker/24hr?symbol={target_symbol}"
+            res = requests.get(url, timeout=4).json()
+            if 'lastPrice' in res:
+                price = float(res['lastPrice'])
+                high = float(res['highPrice'])
+                low_p = float(res['lowPrice'])
+                change = float(res['priceChangePercent'])
+                return f"\n[REAL-TIME LIVE BINANCE DATA: {target_symbol} | Current Price: \({price:,.4f} | 24h High:\){high:,.4f} | 24h Low: ${low_p:,.4f} | 24h Change: {change}%]\n"
+        except Exception:
+            pass
+    return ""
 
 async def send_large_text_reply(update: Update, waiting_msg, full_text: str):
     max_len = 3900
     if len(full_text) <= max_len:
         try:
-            await waiting_msg.edit_text(full_text, parse_mode=ParseMode.MARKDOWN, disable_web_page_preview=True)
+            await waiting_msg.edit_text(full_text, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
         except Exception:
             await waiting_msg.edit_text(full_text, disable_web_page_preview=True)
         return
@@ -185,13 +195,13 @@ async def send_large_text_reply(update: Update, waiting_msg, full_text: str):
         parts.append(full_text)
 
     try:
-        await waiting_msg.edit_text(parts[0], parse_mode=ParseMode.MARKDOWN, disable_web_page_preview=True)
+        await waiting_msg.edit_text(parts[0], parse_mode=ParseMode.HTML, disable_web_page_preview=True)
     except Exception:
         await waiting_msg.edit_text(parts[0], disable_web_page_preview=True)
 
     for part in parts[1:]:
         try:
-            await update.message.reply_text(part, parse_mode=ParseMode.MARKDOWN, disable_web_page_preview=True)
+            await update.message.reply_text(part, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
         except Exception:
             await update.message.reply_text(part, disable_web_page_preview=True)
 
@@ -204,8 +214,8 @@ def transcribe_audio_file(audio_bytes: bytes) -> str:
         return ""
 
     acoustic_prompt = (
-        "বাঙালি আঞ্চলিক উপভাষা, ইথেরিয়াম, বিটকয়েন, সোলানা, ক্রিপ্টোকারেন্সি, "
-        "Ethereum, Bitcoin, Binance, TradingView, support, resistance."
+        "বাঙালি আঞ্চলিক উপভাষা, ইথেরিয়াম, বিটকয়েন, সোলানা, ক্যান্ডেলস্টিক, ভলিউম, "
+        "Ethereum, Bitcoin, Binance, TradingView, support, resistance, SUI, DOGE, PEPE."
     )
 
     try:
@@ -274,60 +284,64 @@ def analyze_user_crypto_query(user_id: int, user_text: str):
     if not groq_client:
         return "⚠️ এআই ত্রুটি: GROQ_API_KEY কনফিগার করা হয়নি।"
 
-    # ১. নির্মাতা সংক্রান্ত প্রশ্নের সরাসরি হার্ডকোড উত্তর
     low_text = user_text.lower().replace("?", "").strip()
     creator_queries = [
         "কে বানিয়েছে", "কে তৈরি করেছে", "who made you", "who created you", "who is your creator",
         "owner কে", "তৈরি কে করেছে", "কার বট", "কে বানাইসে", "কে বানাইছে", "কার তৈরি", "maker",
         "who built you", "tuhe kisne banaya", "tumhe kisne banaya", "কেনে বানাইল", "খনে বানাইসে",
-        "tomake k baniyeche", "tomake k banise", "tomar owner k", "tomar malik k"
+        "tomake k baniyeche", "tomake k banise", "tomar owner k", "tomar malik k", "tomake banaiche kida", "banaiche kida"
     ]
     if any(q in low_text for q in creator_queries):
+        owner_html = f'[{OWNER_NAME}](https://t.me/{OWNER_USERNAME})'
         if is_pure_english(user_text):
-            return f"I was created by [{OWNER_NAME}](https://t.me/{OWNER_USERNAME})."
+            return f"I was created by {owner_html}."
+        elif "kida" in low_text or "kide" in low_text:
+            return f"আঁরে বানাইয়ে {owner_html}।"
         else:
-            return f"আমাকে বানিয়েছেন [{OWNER_NAME}](https://t.me/{OWNER_USERNAME})।"
+            return f"আমাকে তৈরি করেছেন {owner_html}।"
 
-    # ২. স্বাভাবিক কথোপকথন ও কুশল বিনিময়
     greetings_map = {
-        "hi": "Hello! How can I assist you with crypto or markets today?",
-        "hello": "Hello! How can I assist you with crypto or markets today?",
-        "হাই": "হ্যালো! ক্রিপ্টো মার্কেট বা ট্রেডিং নিয়ে আপনাকে কীভাবে সাহায্য করতে পারি?",
-        "হ্যালো": "হ্যালো! ক্রিপ্টো মার্কেট বা ট্রেডিং নিয়ে আপনাকে কীভাবে সাহায্য করতে পারি?",
+        "hi": "Hello! How can I assist you with crypto, technical analysis, or markets today?",
+        "hello": "Hello! How can I assist you with crypto, technical analysis, or markets today?",
+        "হাই": "হ্যালো! ক্রিপ্টো মার্কেট, ক্যান্ডেলস্টিক বা চার্ট নিয়ে আপনাকে কীভাবে সাহায্য করতে পারি?",
+        "হ্যালো": "হ্যালো! ক্রিপ্টো মার্কেট, ক্যান্ডেলস্টিক বা চার্ট নিয়ে আপনাকে কীভাবে সাহায্য করতে পারি?",
         "কেমন আছো": "আমি ভালো আছি, ধন্যবাদ! আপনার ট্রেডিং কেমন চলছে?",
         "kemon acho": "আমি ভালো আছি, ধন্যবাদ! আপনার ট্রেডিং কেমন চলছে?",
         "tumi kemon acho": "আমি চমৎকার আছি! আপনার ক্রিপ্টো সংক্রান্ত কোনো আপডেট লাগবে?",
-        "tumi ki amar kotha bujhte parcho": "হ্যাঁ, আমি আপনার কথা পুরোপুরি বুঝতে পারছি। ক্রিপ্টো মার্কেট বা কয়েন নিয়ে যেকোনো প্রশ্ন করুন।"
+        "tumi ki amar kotha bujhte parcho": "হ্যাঁ, আমি আপনার কথা পুরোপুরি বুঝতে পারছি। ক্রিপ্টো মার্কেট বা চার্ট নিয়ে যেকোনো প্রশ্ন করুন।"
     }
     for g_key, g_reply in greetings_map.items():
         if g_key in low_text:
             return g_reply
 
-    live_data = get_binance_live_price(user_text)
+    market_data = get_market_data_for_query(user_text)
     history = user_chat_histories.get(user_id, [])
     current_time_str = get_user_current_time_str()
 
     recent_news_context = ""
-    if live_data and LATEST_NEWS_CACHE:
+    if market_data and LATEST_NEWS_CACHE:
         recent_news_context = "\n[LIVE BREAKING NEWS HAPPENING RIGHT NOW]:\n" + "\n".join(
             [f"- {n['title']}: {n['summary'][:150]}..." for n in LATEST_NEWS_CACHE[:2]]
         ) + "\n"
 
     system_instruction = (
-        f"You are the Ultimate Real-Time Crypto Intelligence Brain. Current Live Date/Time: {current_time_str}.\n"
-        f"Creator Info: You were created by [{OWNER_NAME}](https://t.me/{OWNER_USERNAME}).\n\n"
-        "STRICT REAL-TIME ACCURACY & DATA BINDING:\n"
-        "1. Real-Time Price Enforcement: If [REAL-TIME LIVE BINANCE DATA] is provided, you MUST report that exact price! NEVER invent, hallucinate, or recall outdated historic prices (like ETH $1,800 or BTC $38,000). Always state the verified live market price provided.\n"
-        "2. Technical & Roadmap Updates: When discussing upcoming coin upgrades, roadmaps, and support/resistance zones, speak strictly in the context of the CURRENT live year (2026). Do NOT describe 2022/2023 historical events as recent.\n"
-        "3. Language & Dialect: Romanized Bengali (Banglish) is strictly Bengali. Reply in natural Bengali when addressed in Bengali or Banglish. Never use Hindi script for Banglish.\n"
-        "4. Tone & Scope: Concise, direct, authoritative crypto analysis. No markdown asterisks (**)."
+        f"You are the Ultimate Real-Time Crypto Intelligence, Technical Analyst & Educational Brain. Current Live Date/Time: {current_time_str}.\n"
+        f"Creator Info: You were created by {OWNER_NAME} (Telegram: https://t.me/{OWNER_USERNAME}).\n\n"
+        "ENCYCLOPEDIC CRYPTO KNOWLEDGE BASE:\n"
+        "1. Technical Analysis & Price Action: Comprehensive mastery of Candlestick patterns (Doji, Hammer, Engulfing, Morning/Evening Star, Three White Soldiers), Smart Money Concepts (SMC, Order Blocks, Liquidity Sweeps, Fair Value Gap / FVG, Break of Structure / BOS, Change of Character / CHoCH).\n"
+        "2. Indicators & Volume: Relative Strength Index (RSI Divergences), MACD, Bollinger Bands, Moving Averages (EMA 20, 50, 100, 200), Fibonacci Retracements/Extensions, Cumulative Volume Delta (CVD), Volume Spread Analysis (VSA), Open Interest (OI), Funding Rates, Liquidation Heatmaps.\n"
+        "3. Market Cap & Indices: TOTAL (Total Crypto Cap), TOTAL2 (ex-BTC), TOTAL3 (Altcoin Market Cap ex-BTC & ETH), BTC Dominance (BTC.D), USDT Dominance (USDT.D), FDV (Fully Diluted Valuation), Tokenomics, and Whale On-chain Flow.\n"
+        "4. Exchanges & Practical Trading: Spot Trading, Futures Trading (Leverage, Cross/Isolated Margin, Long/Short liquidation management, Stop-Loss/Take-Profit) across Binance, Bybit, Bitget, KuCoin, MEXC, OKX, and DEXs (Uniswap, Raydium).\n"
+        "5. Real-Time Data Handling: When [BINANCE VERIFIED TOP GAINERS] or [REAL-TIME LIVE BINANCE DATA] is provided, you have full live market feed access! Never say you lack live data. Directly present the live figures.\n"
+        "6. Language & Dialects: Romanized Bengali (Banglish) is strictly Bengali. Match the user's language and regional dialect. Never use Devanagari Hindi for Banglish.\n"
+        "7. Tone: Direct, expert, concise, authoritative, and completely free of markdown asterisks (**)."
     )
 
     messages = [{"role": "system", "content": system_instruction}]
     for h in history[-3:]:
         messages.append({"role": h["role"], "content": h["text"]})
 
-    current_content = f"{live_data}{recent_news_context}\nUser Input: {user_text}"
+    current_content = f"{market_data}{recent_news_context}\nUser Input: {user_text}"
     messages.append({"role": "user", "content": current_content})
 
     try:
@@ -347,7 +361,7 @@ def analyze_user_crypto_query(user_id: int, user_text: str):
         return f"⚠️ Error: {str(e)[:120]}"
 
 # -----------------------------------------------------------------------------
-# টেলিগ্রাম হ্যান্ডলার
+# অ্যাডমিন প্যানেল ও ইউজার ব্লক/আনব্লক ম্যানেজমেন্ট
 # -----------------------------------------------------------------------------
 
 async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -355,29 +369,50 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⛔ আপনি বটের মূল অ্যাডমিন নন।")
         return
 
-    users_list = "\n".join([f"• {u}" for u in APPROVED_CHAT_USERS]) or "None"
-    channels_list = "\n".join([f"• {c}" for c in APPROVED_CHANNELS if c]) or "None"
     current_time_str = get_user_current_time_str()
+    channels_list = "\n".join([f"• {c}" for c in APPROVED_CHANNELS if c]) or "None"
 
     panel_text = (
-        "👑 Admin Control Dashboard\n"
+        "👑 **Admin Control Dashboard**\n"
         f"📅 Date: {current_time_str}\n"
         "━━━━━━━━━━━━━━━━━━\n\n"
-        f"👥 Approved Users:\n{users_list}\n\n"
-        f"📢 Approved Channels:\n{channels_list}"
+        f"📢 **Approved Channels:**\n{channels_list}\n\n"
+        "👥 **User Management:**\nনিচে অনুমোদিত ইউজারদের ব্লক বা আনব্লক করতে বাটনে চাপুন:"
     )
-    await update.message.reply_text(panel_text)
+
+    keyboard = []
+    for uid in list(APPROVED_CHAT_USERS):
+        if uid == ADMIN_ID:
+            continue
+        keyboard.append([
+            InlineKeyboardButton(f"🚫 Block {uid}", callback_data=f"user_block_{uid}")
+        ])
+
+    for b_uid in list(BLOCKED_USERS):
+        keyboard.append([
+            InlineKeyboardButton(f"✅ Unblock {b_uid}", callback_data=f"user_unblock_{b_uid}")
+        ])
+
+    if not keyboard:
+        keyboard = [[InlineKeyboardButton("ℹ️ কোনো সাধারণ ইউজার নেই", callback_data="none")]]
+
+    await update.message.reply_text(panel_text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
+
+    if user.id in BLOCKED_USERS:
+        await update.message.reply_text("🚫 দুঃখিত, আপনাকে এই বট থেকে ব্লক করা হয়েছে।")
+        return
+
     if user.id in APPROVED_CHAT_USERS:
         await update.message.reply_text(
-            f"স্বাগতম {user.first_name}! আমি আপনার রিয়েল-টাইম ক্রিপ্টো ও ট্রেডিং এআই।\n"
-            "যেকোনো কয়েনের লাইভ দাম, চার্ট বিশ্লেষণ, TOTAL3 বা ট্রেডিং নিয়ে প্রশ্ন করতে পারেন।"
+            f"স্বাগতম {user.first_name}! আমি আপনার সর্বজনীন ক্রিপ্টো, ট্রেডিং ও টেকনিক্যাল এআই।\n"
+            "ক্যান্ডেলস্টিক, ভলিউম, চার্ট প্যাটার্ন, টপ গেইনার বা ফিউচার ট্রেডিং নিয়ে যেকোনো প্রশ্ন করতে পারেন।"
         )
     else:
         if user.id in PENDING_REQUEST_USERS:
-            await update.message.reply_text("⏳ আপনার এক্সেস রিকোয়েস্ট বিবেচনাধীন রয়েছে। অ্যাডমিন অনুমোদন দেওয়া পর্যন্ত অপেক্ষা করুন।")
+            await update.message.reply_text("⏳ আপনার এক্সেস রিকোয়েস্ট ইতিমধ্যে বিবেচনাধীন রয়েছে। অনুগ্রহ করে অপেক্ষা করুন।")
             return
 
         PENDING_REQUEST_USERS.add(user.id)
@@ -395,6 +430,11 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
+
+    if user.id in BLOCKED_USERS:
+        await update.message.reply_text("🚫 আপনি এই বটের এক্সেস থেকে ব্লকড রয়েছেন।")
+        return
+
     if user.id not in APPROVED_CHAT_USERS:
         if user.id in PENDING_REQUEST_USERS:
             await update.message.reply_text("⏳ আপনার রিকোয়েস্ট বিবেচনাধীন রয়েছে।")
@@ -406,7 +446,7 @@ async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_T
     if is_pure_english(user_query):
         wait_text = "🔍 Analyzing live market..."
     else:
-        wait_text = "🔍 লাইভ মার্কেট যাচাই করছি..."
+        wait_text = "🔍 লাইভ মার্কেট ও টেকনিক্যাল চার্ট যাচাই করছি..."
 
     waiting_msg = await update.message.reply_text(wait_text)
     reply_text = analyze_user_crypto_query(user.id, user_query)
@@ -414,6 +454,11 @@ async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_T
 
 async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
+
+    if user.id in BLOCKED_USERS:
+        await update.message.reply_text("🚫 আপনি এই বটের এক্সেস থেকে ব্লকড রয়েছেন।")
+        return
+
     if user.id not in APPROVED_CHAT_USERS:
         if user.id in PENDING_REQUEST_USERS:
             await update.message.reply_text("⏳ আপনার রিকোয়েস্ট বিবেচনাধীন রয়েছে।")
@@ -484,6 +529,7 @@ async def handle_button_actions(update: Update, context: ContextTypes.DEFAULT_TY
         uid = int(data.split("_")[2])
         APPROVED_CHAT_USERS.add(uid)
         PENDING_REQUEST_USERS.discard(uid)
+        BLOCKED_USERS.discard(uid)
         await query.edit_message_text(f"✅ User {uid} approved successfully.")
         try:
             await context.bot.send_message(chat_id=uid, text="🎉 অ্যাডমিন আপনার এক্সেস অনুমোদন করেছেন! এখন থেকে আপনি বট ব্যবহার করতে পারেন।")
@@ -496,6 +542,26 @@ async def handle_button_actions(update: Update, context: ContextTypes.DEFAULT_TY
         await query.edit_message_text(f"❌ User {uid} rejected. (Status reset: User can re-apply).")
         try:
             await context.bot.send_message(chat_id=uid, text="⛔ দুঃখিত, আপনার এক্সেস রিকোয়েস্ট বাতিল করা হয়েছে।")
+        except Exception:
+            pass
+
+    elif data.startswith("user_block_"):
+        uid = int(data.split("_")[2])
+        APPROVED_CHAT_USERS.discard(uid)
+        BLOCKED_USERS.add(uid)
+        await query.edit_message_text(f"🚫 User {uid} has been BLOCKED. They cannot use the bot.")
+        try:
+            await context.bot.send_message(chat_id=uid, text="🚫 আপনার এক্সেস অ্যাডমিন কর্তৃক ব্লক করা হয়েছে।")
+        except Exception:
+            pass
+
+    elif data.startswith("user_unblock_"):
+        uid = int(data.split("_")[2])
+        BLOCKED_USERS.discard(uid)
+        APPROVED_CHAT_USERS.add(uid)
+        await query.edit_message_text(f"✅ User {uid} has been UNBLOCKED and approved.")
+        try:
+            await context.bot.send_message(chat_id=uid, text="🎉 আপনাকে আনব্লক করা হয়েছে! এখন পুনরায় বট ব্যবহার করতে পারেন।")
         except Exception:
             pass
 
@@ -517,17 +583,17 @@ async def receive_custom_leave_message(update: Update, context: ContextTypes.DEF
     target_channel_id = context.user_data.get('target_channel_to_leave')
 
     if target_channel_id:
-        owner_link = f"[{OWNER_NAME}](https://t.me/{OWNER_USERNAME})"
+        owner_html = f'[{OWNER_NAME}](https://t.me/{OWNER_USERNAME})'
         final_msg = (
             f"{format_clean_text(custom_text)}\n\n"
             f"━━━━━━━━━━━━━━━━━━\n"
-            f"Owner: {owner_link}"
+            f"Owner: {owner_html}"
         )
         try:
             await context.bot.send_message(
                 chat_id=target_channel_id,
                 text=final_msg,
-                parse_mode=ParseMode.MARKDOWN,
+                parse_mode=ParseMode.HTML,
                 disable_web_page_preview=True
             )
         except Exception as e:
@@ -656,7 +722,7 @@ async def background_market_scanner(app):
         await asyncio.sleep(300)
 
 # -----------------------------------------------------------------------------
-# মেইন অ্যাপ রানার
+# মেইন অ্যাপ
 # -----------------------------------------------------------------------------
 
 def main():
@@ -681,7 +747,7 @@ def main():
     loop = asyncio.get_event_loop()
     loop.create_task(background_market_scanner(app))
 
-    logger.info("Bot is active with Universal Binance Asset Matcher...")
+    logger.info("Bot is active with Complete Institutional Technical Brain & User Ban System...")
     app.run_polling()
 
 if __name__ == "__main__":
