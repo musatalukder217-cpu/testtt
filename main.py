@@ -1,24 +1,24 @@
 """
 ╔══════════════════════════════════════════════════════════════════╗
-║          CRYPTO INTELLIGENCE TELEGRAM BOT v6.0 (STRICT MODE)    ║
-║          Real-Time Live Price Fetching + No Noise + SEO News    ║
+║          CRYPTO INTELLIGENCE TELEGRAM BOT v6.0                  ║
+║  Strict Real-Time Binance Data | Zero Clutter | No Hallucination ║
 ╚══════════════════════════════════════════════════════════════════╝
 """
 
 import os
-import re
 import html
 import time
 import logging
 import asyncio
 import calendar
-import aiohttp
+import requests
+import re
 from datetime import datetime, timezone, timedelta
 from collections import defaultdict
 from typing import Optional, Tuple
 
 import feedparser
-from groq import AsyncGroq
+from groq import Groq
 from telegram import (
     Update,
     InlineKeyboardButton,
@@ -61,29 +61,29 @@ assert ADMIN_ID, "ADMIN_ID is missing!"
 assert GROQ_API_KEY, "GROQ_API_KEY is missing!"
 
 # ─────────────────────────────────────────────────────────────
-# GROQ API SYSTEM (Async Client)
+# GROQ API SYSTEM
 # ─────────────────────────────────────────────────────────────
 try:
-    groq_client = AsyncGroq(api_key=GROQ_API_KEY)
+    groq_client = Groq(api_key=GROQ_API_KEY)
 except Exception as e:
     logger.error(f"Groq Client Init Failed: {e}")
     groq_client = None
 
 GROQ_MODELS = [
+    "openai/gpt-oss-120b",
     "llama-3.1-8b-instant",
-    "llama3-70b-8192",
     "llama-3.3-70b-versatile"
 ]
 
-async def get_groq_response(messages: list[dict], max_tokens: int = 1500) -> Tuple[Optional[str], Optional[str]]:
+def get_groq_response_sync(messages: list[dict], max_tokens: int = 1500) -> Tuple[Optional[str], Optional[str]]:
     if not groq_client: return None, "Groq client is not initialized."
     last_error = ""
     for model_name in GROQ_MODELS:
         try:
-            response = await groq_client.chat.completions.create(
+            response = groq_client.chat.completions.create(
                 model=model_name,
                 messages=messages,
-                temperature=0.1, # Extremely low temperature to enforce strictness
+                temperature=0.1, # Extremely low temperature for strict factual accuracy
                 max_tokens=max_tokens
             )
             return response.choices[0].message.content.strip(), None
@@ -117,15 +117,8 @@ RSS_FEEDS = [
     "https://decrypt.co/feed"
 ]
 
-# Common Coin Name to Ticker Mapping for accurate Binance fetch
-COMMON_COINS = {
-    "BITCOIN": "BTC", "ETHEREUM": "ETH", "SOLANA": "SOL", "RIPPLE": "XRP",
-    "DOGECOIN": "DOGE", "TON": "TON", "POLYGON": "MATIC", "MATIC": "MATIC",
-    "CARDANO": "ADA", "AVALANCHE": "AVAX", "CHAINLINK": "LINK", "BINANCE": "BNB", "BNB": "BNB"
-}
-
 # ─────────────────────────────────────────────────────────────
-# UTILITY FUNCTIONS
+# UTILITIES & LIVE BINANCE DATA FETCHER
 # ─────────────────────────────────────────────────────────────
 def owner_link() -> str:
     if OWNER_USERNAME:
@@ -136,71 +129,87 @@ def owner_link() -> str:
 def clean_text(text: str) -> str:
     return text.replace("**", "").replace("*", "").strip()
 
-# ─────────────────────────────────────────────────────────────
-# 1. LIVE BINANCE DATA FETCHER (MANDATORY ARCHITECTURE)
-# ─────────────────────────────────────────────────────────────
-async def fetch_live_market_data(user_text: str) -> str:
-    """Detects coins in user text and fetches real-time data from Binance API."""
-    words = re.findall(r'\b[A-Za-z]+\b', user_text.upper())
-    tickers_to_check = set()
+COIN_MAPPING = {
+    "bitcoin": "BTC", "btc": "BTC",
+    "ethereum": "ETH", "eth": "ETH",
+    "solana": "SOL", "sol": "SOL",
+    "binance": "BNB", "bnb": "BNB",
+    "ripple": "XRP", "xrp": "XRP",
+    "dogecoin": "DOGE", "doge": "DOGE",
+    "pepe": "PEPE", "shiba": "SHIB", "shib": "SHIB",
+    "sui": "SUI", "aptos": "APT", "apt": "APT",
+    "cardano": "ADA", "ada": "ADA",
+    "matic": "POL", "polygon": "POL", "pol": "POL",
+    "avax": "AVAX", "avalanche": "AVAX",
+    "near": "NEAR", "link": "LINK"
+}
+
+def fetch_live_binance_data(user_text: str) -> str:
+    """Intersects text, extracts coins, and fetches 0.0s LIVE data from Binance."""
+    words = re.findall(r'\b[a-zA-Z]+\b', user_text.lower())
+    found_symbols = set()
     
+    # 1. Match from dict
     for word in words:
-        if word in COMMON_COINS:
-            tickers_to_check.add(COMMON_COINS[word] + "USDT")
-        elif 2 <= len(word) <= 6:
-            tickers_to_check.add(word + "USDT")
-            
-    if not tickers_to_check:
-        return ""
-        
-    results = []
-    async with aiohttp.ClientSession() as session:
-        for symbol in list(tickers_to_check)[:5]: # Limit to max 5 coins to prevent delay
-            try:
-                url = f"https://api.binance.com/api/v3/ticker/24hr?symbol={symbol}"
-                async with session.get(url, timeout=2.0) as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        price = float(data['lastPrice'])
-                        high = float(data['highPrice'])
-                        low = float(data['lowPrice'])
-                        change = float(data['priceChangePercent'])
-                        vol = float(data['quoteVolume'])
-                        
-                        coin_name = symbol.replace('USDT', '')
-                        results.append(
-                            f"[{coin_name}] CURRENT LIVE PRICE: ${price:g} | "
-                            f"24h Change: {change:+.2f}% | "
-                            f"24h High: ${high:g} | 24h Low: ${low:g} | Volume: ${vol:,.0f}"
-                        )
-            except Exception:
-                continue
+        if word in COIN_MAPPING:
+            found_symbols.add(COIN_MAPPING[word])
     
-    return "\n".join(results)
+    # 2. Match raw uppercase symbols (like TRB, FET)
+    raw_symbols = re.findall(r'\b[A-Z]{2,6}\b', user_text)
+    for sym in raw_symbols:
+        found_symbols.add(sym)
+
+    if not found_symbols: return ""
+
+    live_data_str = "=== STRICT LIVE MARKET DATA INJECTED BY SYSTEM ===\n"
+    has_data = False
+
+    for sym in found_symbols:
+        try:
+            res = requests.get(f"https://api.binance.com/api/v3/ticker/24hr?symbol={sym}USDT", timeout=2).json()
+            if 'lastPrice' in res:
+                price = float(res['lastPrice'])
+                change = float(res['priceChangePercent'])
+                high = float(res['highPrice'])
+                low = float(res['lowPrice'])
+                vol = float(res['volume'])
+                live_data_str += (
+                    f"Coin: {sym} | Current Live Price: ${price:,.4f} | "
+                    f"24h Change: {change:+.2f}% | 24h High: ${high:,.4f} | "
+                    f"24h Low: ${low:,.4f} | Volume: {vol:,.0f}\n"
+                )
+                has_data = True
+        except Exception:
+            continue
+            
+    if has_data:
+        live_data_str += "=================================================\n"
+        return live_data_str
+    return ""
 
 # ─────────────────────────────────────────────────────────────
-# 2. REAL-TIME NEWS ANALYSIS (STRICT NO-LINK MODE)
+# 1. REAL-TIME NEWS ANALYSIS & SEO BROADCAST (NO LINKS)
 # ─────────────────────────────────────────────────────────────
-async def generate_seo_news_post(title: str, summary: str, pub_date_str: str) -> Optional[str]:
+def generate_seo_news_post(title: str, summary: str, pub_date_str: str) -> Optional[str]:
     system_prompt = """You are a strict institutional crypto news analyst.
 CRITICAL RULES:
-1. NO LINKS: Do not include ANY external links, URLs, or "Read more" text.
-2. NO HALLUCINATION: Only use the provided Title and Summary.
-3. LANGUAGE: HEADLINE MUST be in Bengali. IMPACT and DRIVERS MUST be in English.
-4. FORMAT: Output exactly the 4 lines below. No Markdown asterisks.
+1. NEVER hallucinate or use old data. Use ONLY the provided Title and Summary.
+2. NO EXTERNAL LINKS. Do not add any source links or website names.
+3. ZERO CLUTTER: No intros, no disclaimers, no warnings.
+4. Output EXACTLY in the 4-line format below.
 
 Format:
-HEADLINE: [Bengali Headline, max 12 words. Start with 🔴, 🟢, or ⚪]
-IMPACT: [Bullish / Bearish / Neutral - 1 short line analysis]
-DRIVERS: [1-2 lines WHY this matters based on text]
-TAGS: [#Tag1 #Tag2 #Tag3 - Crypto tags]"""
+HEADLINE: [Write a highly attractive Bengali headline, max 12 words. Start with 🔴, 🟢, or ⚪]
+IMPACT: [Bullish / Bearish / Neutral / Highly Volatile - Short English analysis of the impact]
+DRIVERS: [1-2 lines English explanation of WHY this matters, strictly based on the text]
+TAGS: [#Tag1 #Tag2 #Tag3 #Tag4 #Tag5 - High volume SEO crypto tags]"""
 
-    user_prompt = f"Title: {title}\nSummary: {summary}"
+    user_prompt = f"Original Title: {title}\nSummary: {summary}"
 
-    res, err = await get_groq_response([
+    res, err = get_groq_response_sync([
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_prompt}
-    ], max_tokens=800)
+    ], max_tokens=1000)
 
     if not res: return None
 
@@ -213,25 +222,24 @@ TAGS: [#Tag1 #Tag2 #Tag3 - Crypto tags]"""
 
     if not headline or not impact: return None
 
-    # NO URL INCLUDED AS PER MANDATE
+    # NO SOURCE LINK INCLUDED AS PER MANDATE
     final_post = (
         f"{headline}\n\n"
-        f"🕒 <b>Time:</b> {pub_date_str}\n"
+        f"🕒 <b>Date & Time:</b> {pub_date_str}\n"
         f"📊 <b>Market Impact:</b> {impact}\n"
         f"💡 <b>Key Drivers:</b> {drivers}\n"
         f"━━━━━━━━━━━━━━━━━━\n"
-        f"🏷️ <b>Tags:</b> {tags}"
+        f"🏷️ <b>Trending SEO Tags:</b> {tags}"
     )
     return final_post
 
 async def background_market_scanner(app: Application):
     await asyncio.sleep(5)
-    logger.info("Strict Real-time RSS scanner started...")
+    logger.info("Real-time RSS scanner started...")
     
     while True:
         try:
             now_utc = datetime.now(timezone.utc)
-            
             for url in RSS_FEEDS:
                 feed = await asyncio.to_thread(feedparser.parse, url)
                 
@@ -242,41 +250,36 @@ async def background_market_scanner(app: Application):
                     if hasattr(entry, 'published_parsed') and entry.published_parsed:
                         pub_ts = calendar.timegm(entry.published_parsed)
                         pub_time = datetime.fromtimestamp(pub_ts, tz=timezone.utc)
-                        
-                        if now_utc - pub_time > timedelta(hours=1): # Stricter 1-hour rule
+                        # ONLY process news from the last 2 hours
+                        if now_utc - pub_time > timedelta(hours=2):
                             seen_news_ids.add(nid)
                             continue
                     else:
-                        continue
+                        continue 
 
                     seen_news_ids.add(nid)
                     pub_date_str = pub_time.strftime("%d %b %Y, %H:%M UTC")
                     title = entry.title
                     summary = entry.get("summary", "")[:500]
 
-                    broadcast_text = await generate_seo_news_post(title, summary, pub_date_str)
+                    broadcast_text = await asyncio.to_thread(
+                        generate_seo_news_post, title, summary, pub_date_str
+                    )
+                    
                     if not broadcast_text: continue
 
                     for ch_id in list(approved_channels):
                         try:
-                            await app.bot.send_message(
-                                chat_id=ch_id,
-                                text=broadcast_text,
-                                parse_mode=ParseMode.HTML,
-                                disable_web_page_preview=True
-                            )
-                        except Exception:
-                            pass
+                            await app.bot.send_message(chat_id=ch_id, text=broadcast_text, parse_mode=ParseMode.HTML)
+                        except: pass
                     
                     await asyncio.sleep(5)
-                    
         except Exception as e:
             logger.error(f"Scanner Loop error: {e}")
-
-        await asyncio.sleep(300) # Fast Scan: every 5 minutes
+        await asyncio.sleep(600)
 
 # ─────────────────────────────────────────────────────────────
-# 3. CHANNEL APPROVAL & REJECTION LOGIC
+# 2. CHANNEL APPROVAL & REJECTION LOGIC
 # ─────────────────────────────────────────────────────────────
 async def bot_added_to_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     result = update.my_chat_member
@@ -287,14 +290,13 @@ async def bot_added_to_channel(update: Update, context: ContextTypes.DEFAULT_TYP
     if new_status in [ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.MEMBER]:
         if chat.id not in approved_channels:
             keyboard = [[
-                InlineKeyboardButton("✅ Approve", callback_data=f"chnl_apprv_{chat.id}"),
-                InlineKeyboardButton("❌ Reject", callback_data=f"chnl_rejct_{chat.id}")
+                InlineKeyboardButton("✅ Approve Channel", callback_data=f"chnl_apprv_{chat.id}"),
+                InlineKeyboardButton("❌ Reject & Leave", callback_data=f"chnl_rejct_{chat.id}")
             ]]
             await context.bot.send_message(
                 chat_id=ADMIN_ID,
-                text=f"📢 <b>Channel Alert!</b>\n{chat.title} (ID: <code>{chat.id}</code>)",
-                parse_mode=ParseMode.HTML,
-                reply_markup=InlineKeyboardMarkup(keyboard)
+                text=f"📢 <b>Unauthorized Channel Alert!</b>\nChannel: {chat.title} (ID: <code>{chat.id}</code>)",
+                parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(keyboard)
             )
 
 async def channel_rejection_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -304,7 +306,7 @@ async def channel_rejection_start(update: Update, context: ContextTypes.DEFAULT_
 
     cid = int(query.data.split("_")[2])
     context.user_data['target_channel'] = cid
-    await query.edit_message_text(f"📝 Rejecting Channel <code>{cid}</code>.\nType custom leave message:", parse_mode=ParseMode.HTML)
+    await query.edit_message_text(f"📝 Rejecting Channel <code>{cid}</code>.\nPlease type custom leave message:", parse_mode=ParseMode.HTML)
     return WAITING_REJECT_TEXT
 
 async def receive_custom_leave_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -312,40 +314,32 @@ async def receive_custom_leave_message(update: Update, context: ContextTypes.DEF
     target_cid = context.user_data.get('target_channel')
 
     if target_cid:
-        final_msg = (
-            f"{clean_text(custom_text)}\n\n"
-            f"━━━━━━━━━━━━━━━━━━\n"
-            f"Owner: {owner_link()}"
-        )
+        final_msg = f"{clean_text(custom_text)}\n\n━━━━━━━━━━━━━━━━━━\nOwner: {owner_link()}"
         try:
-            await context.bot.send_message(
-                chat_id=target_cid,
-                text=final_msg,
-                parse_mode=ParseMode.HTML,
-                disable_web_page_preview=True
-            )
+            await context.bot.send_message(chat_id=target_cid, text=final_msg, parse_mode=ParseMode.HTML)
             await context.bot.leave_chat(chat_id=target_cid)
-            await update.message.reply_text("✅ Message sent & bot left channel.")
+            await update.message.reply_text("✅ Message sent and left channel.")
         except Exception as e:
             await update.message.reply_text(f"⚠️ Error: {e}")
-        
         context.user_data.pop('target_channel', None)
-    
     return ConversationHandler.END
 
 async def cancel_reject(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Cancelled.")
+    await update.message.reply_text("Action cancelled.")
     return ConversationHandler.END
 
 # ─────────────────────────────────────────────────────────────
-# 4. PRIVATE CHATBOT & REAL-TIME INJECTION
+# 3. PRIVATE CHATBOT WITH STRICT NO-HALLUCINATION RULES
 # ─────────────────────────────────────────────────────────────
-SYSTEM_PROMPT = """You are "Crypto Intel AI" — an elite crypto analyst.
-CRITICAL MANDATES:
-1. ZERO CLUTTER: NEVER include introductions, disclaimers, external links, third-party mentions, or apologies. Be precise and to-the-point.
-2. LIVE DATA ONLY: NEVER output cryptocurrency prices from your internal training data. I will provide real-time LIVE data in the context if the user asks. You MUST base your answer strictly on that live data.
-3. LANGUAGE: Detect user's language automatically and reply in the same language.
-4. OUT OF BOUNDS: Refuse any non-crypto/non-finance questions immediately and briefly."""
+def build_system_prompt() -> str:
+    now_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    return f"""You are "Crypto Intel AI". Current Server Time: {now_utc}.
+
+CRITICAL ARCHITECTURE RULES (MANDATORY):
+1. ZERO HALLUCINATION FOR PRICES: NEVER use your internal training data to quote a crypto price. If live market data is injected by the system, state EXACTLY that data. 
+2. ZERO CLUTTER: DO NOT provide third-party links, website URLs, or external references. DO NOT add safety warnings, disclaimers, or unnecessary introductory/concluding remarks.
+3. DIRECT ANSWERS: Give the user EXACTLY what they asked for. No past history (e.g., 2021/2024 bull runs) unless explicitly requested.
+4. LANGUAGE MATCH: Reply strictly in the language the user used (Bengali, English, Banglish)."""
 
 async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text: return
@@ -353,34 +347,31 @@ async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_T
     if update.effective_chat.type != ChatType.PRIVATE: return
 
     if user_id not in allowed_users:
-        if user_id in pending_users:
-            await update.message.reply_text("⏳ Request pending.")
-        else:
-            await update.message.reply_text("🔒 Access Denied. Use /start.")
+        await update.message.reply_text("🔒 Access Denied. Use /start to request access.")
         return
 
-    text = update.message.text.strip()
+    user_text = update.message.text.strip()
     await context.bot.send_chat_action(chat_id=user_id, action="typing")
 
-    # 🔴 CORE FEATURE: FETCH LIVE DATA BEFORE LLM CALL 🔴
-    live_market_data = await fetch_live_market_data(text)
+    # 🔴 STRICT REAL-TIME PRICE FETCHING INTERCEPTOR 🔴
+    # Fetch live price 0.0s before LLM call
+    live_data_injection = await asyncio.to_thread(fetch_live_binance_data, user_text)
     
-    dynamic_system = SYSTEM_PROMPT
-    if live_market_data:
-        dynamic_system += (
-            "\n\n🚨 [MANDATORY REAL-TIME DATA FETCHED JUST NOW] 🚨\n"
-            f"{live_market_data}\n"
-            "INSTRUCTION: The user asked about a price. YOU MUST USE THE DATA WRITTEN ABOVE. DO NOT guess or use old memory."
-        )
-
-    messages = [{"role": "system", "content": dynamic_system}]
+    messages = [{"role": "system", "content": build_system_prompt()}]
     messages.extend(user_histories[user_id])
-    messages.append({"role": "user", "content": text})
+    
+    # Inject live data silently into the prompt if coin is detected
+    if live_data_injection:
+        final_prompt = f"{live_data_injection}\nUser Question: {user_text}"
+    else:
+        final_prompt = user_text
 
-    response_text, error_details = await get_groq_response(messages, 2000)
+    messages.append({"role": "user", "content": final_prompt})
+
+    response_text, error_details = await asyncio.to_thread(get_groq_response_sync, messages, 2000)
 
     if response_text:
-        user_histories[user_id].append({"role": "user", "content": text})
+        user_histories[user_id].append({"role": "user", "content": user_text})
         user_histories[user_id].append({"role": "assistant", "content": response_text})
         if len(user_histories[user_id]) > MAX_HISTORY_LENGTH * 2:
             user_histories[user_id] = user_histories[user_id][-MAX_HISTORY_LENGTH * 2:]
@@ -398,13 +389,13 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type != ChatType.PRIVATE: return
 
     if user.id in allowed_users:
-        await update.message.reply_text(f"🌟 <b>Welcome {html.escape(user.first_name)}!</b>\nI am connected to live market data. Ask me any crypto price.", parse_mode=ParseMode.HTML)
+        await update.message.reply_text(f"🌟 <b>Welcome back {html.escape(user.first_name)}!</b>\nAsk me any crypto questions.", parse_mode=ParseMode.HTML)
     else:
         if user.id in pending_users:
             await update.message.reply_text("⏳ Request pending.")
             return
         pending_users.add(user.id)
-        await update.message.reply_text("🔒 Request sent to admin.")
+        await update.message.reply_text("🔒 Access Denied. Request sent to admin.")
         
         keyboard = [[
             InlineKeyboardButton("✅ Allow", callback_data=f"usr_apprv_{user.id}"),
@@ -412,7 +403,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]]
         await context.bot.send_message(
             chat_id=ADMIN_ID,
-            text=f"🔔 <b>Access Request</b>\nUser: <code>{user.id}</code>",
+            text=f"🔔 <b>New Access Request</b>\nUser: <code>{user.id}</code>",
             parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(keyboard)
         )
 
@@ -433,6 +424,7 @@ async def standard_callback_handler(update: Update, context: ContextTypes.DEFAUL
         uid = int(data.split("_")[2])
         pending_users.discard(uid)
         await query.edit_message_text(f"❌ User {uid} denied.")
+    
     elif data.startswith("chnl_apprv_"):
         cid = int(data.split("_")[2])
         approved_channels.add(cid)
@@ -445,7 +437,7 @@ async def post_init(application: Application):
     commands = [BotCommand("start", "Start Bot")]
     await application.bot.set_my_commands(commands)
     try:
-        await application.bot.send_message(ADMIN_ID, "🟢 <b>Bot System v6.0 Online!</b>\nStrict Live API mode activated.", parse_mode=ParseMode.HTML)
+        await application.bot.send_message(ADMIN_ID, "🟢 <b>Bot System v6.0 Online!</b>\nStrict Live Binance Fetching & Zero Clutter Mode Active.", parse_mode=ParseMode.HTML)
     except: pass
 
 def main():
@@ -453,9 +445,7 @@ def main():
 
     reject_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(channel_rejection_start, pattern="^chnl_rejct_")],
-        states={
-            WAITING_REJECT_TEXT: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_custom_leave_message)]
-        },
+        states={WAITING_REJECT_TEXT: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_custom_leave_message)]},
         fallbacks=[CommandHandler("cancel", cancel_reject)]
     )
 
