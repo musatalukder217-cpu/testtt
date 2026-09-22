@@ -18,10 +18,7 @@ from datetime import datetime, timezone
 from collections import defaultdict
 from typing import Optional, Tuple
 
-import feedparser
-import ccxt.async_support as ccxt
 from groq import AsyncGroq
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from telegram import (
     Update,
@@ -34,11 +31,10 @@ from telegram.ext import (
     CommandHandler,
     MessageHandler,
     CallbackQueryHandler,
-    ChatMemberHandler,
     ContextTypes,
     filters,
 )
-from telegram.constants import ParseMode, ChatMemberStatus, ChatType
+from telegram.constants import ParseMode, ChatType
 
 # ─────────────────────────────────────────────────────────────
 # LOGGING
@@ -58,6 +54,9 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
 PUBLIC_CHANNEL_ID = os.getenv("PUBLIC_CHANNEL_ID", "").strip()
 OWNER_NAME = os.getenv("OWNER_NAME", "Admin").strip()
 OWNER_USERNAME = os.getenv("OWNER_USERNAME", "").strip()
+
+# ✅ FIXED: Model now configurable + safe default
+GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.1-70b-versatile").strip()
 
 assert TELEGRAM_BOT_TOKEN, "TELEGRAM_BOT_TOKEN is missing!"
 assert ADMIN_ID, "ADMIN_ID is missing!"
@@ -105,7 +104,7 @@ if PUBLIC_CHANNEL_ID:
         pass
 
 last_groq_call: float = 0.0
-GROQ_MIN_INTERVAL = 1.0 
+GROQ_MIN_INTERVAL = 1.0
 MAX_HISTORY_LENGTH = 20
 
 # ─────────────────────────────────────────────────────────────
@@ -116,6 +115,7 @@ def owner_link() -> str:
         username = OWNER_USERNAME.lstrip("@")
         return f'<a href="https://t.me/{username}">{html.escape(OWNER_NAME)}</a>'
     return html.escape(OWNER_NAME)
+
 
 async def rate_limited_groq_call(messages: list[dict], max_tokens: int = 2048) -> Tuple[Optional[str], Optional[str]]:
     """Call Groq API asynchronously and return (result, error_message)."""
@@ -128,7 +128,7 @@ async def rate_limited_groq_call(messages: list[dict], max_tokens: int = 2048) -
     try:
         last_groq_call = time.time()
         response = await groq_client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
+            model=GROQ_MODEL,  # ✅ FIXED: uses env variable
             messages=messages,
             temperature=0.7,
             max_tokens=max_tokens,
@@ -144,7 +144,8 @@ async def rate_limited_groq_call(messages: list[dict], max_tokens: int = 2048) -
 # ─────────────────────────────────────────────────────────────
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    if update.effective_chat.type != ChatType.PRIVATE: return
+    if update.effective_chat.type != ChatType.PRIVATE:
+        return
 
     if user.id in allowed_users:
         welcome = (
@@ -157,16 +158,24 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         denied_msg = "🔒 <b>Access Denied</b>\nWait for admin approval."
         await update.message.reply_text(denied_msg, parse_mode=ParseMode.HTML)
-        
+
         keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("✅ Allow", callback_data=f"allow_user:{user.id}"),
-             InlineKeyboardButton("❌ Deny", callback_data=f"deny_user:{user.id}")]
+            [
+                InlineKeyboardButton("✅ Allow", callback_data=f"allow_user:{user.id}"),
+                InlineKeyboardButton("❌ Deny", callback_data=f"deny_user:{user.id}"),
+            ]
         ])
         await context.bot.send_message(
             chat_id=ADMIN_ID,
-            text=f"🔔 <b>Access Request</b>\nUser: <a href='tg://user?id={user.id}'>{html.escape(user.first_name)}</a>\nID: <code>{user.id}</code>",
-            parse_mode=ParseMode.HTML, reply_markup=keyboard
+            text=(
+                f"🔔 <b>Access Request</b>\n"
+                f"User: <a href='tg://user?id={user.id}'>{html.escape(user.first_name)}</a>\n"
+                f"ID: <code>{user.id}</code>"
+            ),
+            parse_mode=ParseMode.HTML,
+            reply_markup=keyboard,
         )
+
 
 async def cmd_clear(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -174,8 +183,10 @@ async def cmd_clear(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_histories[user_id] = []
         await update.message.reply_text("🗑️ Chat history cleared!")
 
+
 async def cmd_block(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID: return
+    if update.effective_user.id != ADMIN_ID:
+        return
     if not context.args:
         await update.message.reply_text("Usage: /block <user_id>")
         return
@@ -186,40 +197,53 @@ async def cmd_block(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         allowed_users.discard(target_id)
         user_histories.pop(target_id, None)
-        await update.message.reply_text(f"🚫 User <code>{target_id}</code> has been blocked.", parse_mode=ParseMode.HTML)
+        await update.message.reply_text(
+            f"🚫 User <code>{target_id}</code> has been blocked.",
+            parse_mode=ParseMode.HTML,
+        )
     except ValueError:
         await update.message.reply_text("Invalid User ID.")
 
+
 async def cmd_unblock(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID: return
+    if update.effective_user.id != ADMIN_ID:
+        return
     if not context.args:
         await update.message.reply_text("Usage: /unblock <user_id>")
         return
     try:
         target_id = int(context.args[0])
         allowed_users.add(target_id)
-        await update.message.reply_text(f"✅ User <code>{target_id}</code> has been unblocked/granted access.", parse_mode=ParseMode.HTML)
+        await update.message.reply_text(
+            f"✅ User <code>{target_id}</code> has been unblocked/granted access.",
+            parse_mode=ParseMode.HTML,
+        )
     except ValueError:
         await update.message.reply_text("Invalid User ID.")
 
+
 async def cmd_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID: return
+    if update.effective_user.id != ADMIN_ID:
+        return
     if not allowed_users:
         await update.message.reply_text("No allowed users.")
         return
 
     await update.message.reply_text("👥 <b>Allowed Users List:</b>", parse_mode=ParseMode.HTML)
-    
+
     for uid in list(allowed_users):
-        is_admin = (uid == ADMIN_ID)
+        is_admin = uid == ADMIN_ID
         text = f"👤 User ID: <code>{uid}</code> {'👑 (Admin)' if is_admin else ''}"
-        
+
         keyboard = []
         if not is_admin:
-            keyboard.append([InlineKeyboardButton("❌ Block User", callback_data=f"block_user:{uid}")])
-        
+            keyboard.append(
+                [InlineKeyboardButton("❌ Block User", callback_data=f"block_user:{uid}")]
+            )
+
         reply_markup = InlineKeyboardMarkup(keyboard) if keyboard else None
         await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=reply_markup)
+
 
 # ─────────────────────────────────────────────────────────────
 # CALLBACK QUERY HANDLER
@@ -228,35 +252,50 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
-    if query.from_user.id != ADMIN_ID: return
+    if query.from_user.id != ADMIN_ID:
+        return
     data = query.data
 
     if data.startswith("allow_user:"):
         uid = int(data.split(":")[1])
         allowed_users.add(uid)
-        await query.edit_message_text(f"✅ User <code>{uid}</code> approved.", parse_mode=ParseMode.HTML)
+        await query.edit_message_text(
+            f"✅ User <code>{uid}</code> approved.", parse_mode=ParseMode.HTML
+        )
         try:
-            await context.bot.send_message(uid, "🎉 <b>Access Granted!</b>\nYou can now chat with me.", parse_mode=ParseMode.HTML)
-        except: pass
+            await context.bot.send_message(
+                uid,
+                "🎉 <b>Access Granted!</b>\nYou can now chat with me.",
+                parse_mode=ParseMode.HTML,
+            )
+        except Exception:
+            pass
 
     elif data.startswith("deny_user:"):
         uid = int(data.split(":")[1])
         allowed_users.discard(uid)
-        await query.edit_message_text(f"❌ User <code>{uid}</code> denied.", parse_mode=ParseMode.HTML)
+        await query.edit_message_text(
+            f"❌ User <code>{uid}</code> denied.", parse_mode=ParseMode.HTML
+        )
 
     elif data.startswith("block_user:"):
         uid = int(data.split(":")[1])
         allowed_users.discard(uid)
         user_histories.pop(uid, None)
-        await query.edit_message_text(f"🚫 User <code>{uid}</code> has been blocked.", parse_mode=ParseMode.HTML)
+        await query.edit_message_text(
+            f"🚫 User <code>{uid}</code> has been blocked.", parse_mode=ParseMode.HTML
+        )
+
 
 # ─────────────────────────────────────────────────────────────
 # MESSAGE HANDLER — PERSONAL CHATBOT
 # ─────────────────────────────────────────────────────────────
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message or not update.message.text: return
+    if not update.message or not update.message.text:
+        return
     user_id = update.effective_user.id
-    if update.effective_chat.type != ChatType.PRIVATE: return
+    if update.effective_chat.type != ChatType.PRIVATE:
+        return
 
     if user_id not in allowed_users:
         await update.message.reply_text("🔒 Access Denied. You are blocked or not approved.")
@@ -279,16 +318,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         try:
             await update.message.reply_text(response_text, parse_mode=ParseMode.HTML)
-        except:
+        except Exception:
             await update.message.reply_text(response_text)
     else:
-        # Show EXACT Error Message on Telegram so we can fix it immediately
         err_msg = (
             "❌ <b>Groq API Connection Failed!</b>\n\n"
             f"<b>Error Details:</b>\n<code>{html.escape(str(error_details))}</code>\n\n"
-            "💡 <b>How to Fix:</b> Please check your <code>GROQ_API_KEY</code> in Railway Variables."
+            "💡 <b>How to Fix:</b>\n"
+            "1. Check your <code>GROQ_API_KEY</code> in Railway Variables\n"
+            f"2. Current model: <code>{html.escape(GROQ_MODEL)}</code>\n"
+            "3. Try changing <code>GROQ_MODEL</code> to: <code>llama-3.1-8b-instant</code> or <code>llama3-70b-8192</code>"
         )
         await update.message.reply_text(err_msg, parse_mode=ParseMode.HTML)
+
 
 # ─────────────────────────────────────────────────────────────
 # MAIN APPLICATION SETUP
@@ -303,11 +345,24 @@ async def post_init(application: Application):
     ]
     await application.bot.set_my_commands(commands)
     try:
-        await application.bot.send_message(ADMIN_ID, "🟢 <b>Bot Updated (v3.1)</b>\nDebug Mode Active.", parse_mode=ParseMode.HTML)
-    except: pass
+        await application.bot.send_message(
+            ADMIN_ID,
+            f"🟢 <b>Bot Updated (v3.1)</b>\n"
+            f"Model: <code>{html.escape(GROQ_MODEL)}</code>\n"
+            f"Debug Mode Active.",
+            parse_mode=ParseMode.HTML,
+        )
+    except Exception:
+        pass
+
 
 def main():
-    application = Application.builder().token(TELEGRAM_BOT_TOKEN).post_init(post_init).build()
+    application = (
+        Application.builder()
+        .token(TELEGRAM_BOT_TOKEN)
+        .post_init(post_init)
+        .build()
+    )
 
     application.add_handler(CommandHandler("start", cmd_start))
     application.add_handler(CommandHandler("clear", cmd_clear))
@@ -315,9 +370,15 @@ def main():
     application.add_handler(CommandHandler("block", cmd_block))
     application.add_handler(CommandHandler("unblock", cmd_unblock))
     application.add_handler(CallbackQueryHandler(callback_handler))
-    application.add_handler(MessageHandler(filters.TEXT & filters.ChatType.PRIVATE & ~filters.COMMAND, handle_message))
+    application.add_handler(
+        MessageHandler(
+            filters.TEXT & filters.ChatType.PRIVATE & ~filters.COMMAND,
+            handle_message,
+        )
+    )
 
     application.run_polling(drop_pending_updates=True)
+
 
 if __name__ == "__main__":
     main()
