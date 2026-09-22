@@ -5,7 +5,7 @@ from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
 from google import genai
 
-# লগিং সেটআপ (এরর দেখার জন্য)
+# লগিং সেটআপ
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
@@ -18,7 +18,7 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 # জেমিনাই ক্লায়েন্ট ইনিশিয়ালাইজেশন
 ai_client = genai.Client(api_key=GEMINI_API_KEY)
 
-# RSS Feed থেকে একদম ফ্রিতে ও নিরাপদে নিউজ ফেচ করা (কোনো API Key ছাড়াই)
+# RSS Feed থেকে একদম ফ্রিতে ও নিরাপদে নিউজ ফেচ করা
 def fetch_latest_crypto_news() -> list:
     feed_url = "https://cointelegraph.com/rss"
     try:
@@ -28,9 +28,8 @@ def fetch_latest_crypto_news() -> list:
         # লেটেস্ট ৩টি নিউজ সংগ্রহ
         for entry in feed.entries[:3]:
             title = entry.title
-            # HTML ট্যাগ ছাড়া ক্লিন টেক্সট নেওয়ার চেষ্টা
             summary = entry.summary if hasattr(entry, 'summary') else ''
-            news_items.append(f"Title: {title}\nDetails: {summary[:200]}...") # ২০০ ক্যারেক্টার লিমিট
+            news_items.append(f"Title: {title}\nDetails: {summary[:200]}...")
             
         return news_items
     except Exception as e:
@@ -51,7 +50,7 @@ def analyze_crypto_news(news_text: str) -> str:
     """
     try:
         response = ai_client.models.generate_content(
-            model='gemini-2.5-flash',
+            model='gemini-3.6-flash',
             contents=prompt
         )
         return response.text
@@ -91,7 +90,7 @@ async def chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     try:
         response = ai_client.models.generate_content(
-            model='gemini-2.5-flash',
+            model='gemini-3.6-flash',
             contents=f"{system_instruction}\nUser Query: {user_query}"
         )
         await update.message.reply_text(response.text)
