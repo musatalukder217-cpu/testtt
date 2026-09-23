@@ -580,10 +580,11 @@ def detect_language(text: str) -> str:
     hi_score = len(words & HINDI_LATIN_HINTS)
 
     # Romanized Bengali / Banglish and Romanized Hindi / Hinglish.
+    # Banglish input must receive Bengali-script output.
     if bn_score >= 2 and bn_score >= hi_score + 1:
-        return "bn_latn"
+        return "bn"
     if hi_score >= 2 and hi_score > bn_score:
-        return "hi_latn"
+        return "hi"
     return "en"
 
 
@@ -640,14 +641,14 @@ STRICT RULES:
 4. For live numeric facts, use ONLY supplied live data. Never invent current numbers.
 5. If live data for the exact item is unavailable, say so briefly and still answer any conceptual part you can.
 6. You are also a general-purpose AI. You may answer normal general-knowledge questions instead of rejecting them.
-7. LANGUAGE MATCHING IS STRICT:
+7. LANGUAGE OUTPUT RULES:
    - Bengali script input -> answer in Bengali script.
-   - Banglish/Romanized Bengali input -> answer in Banglish using Latin/English letters, not Bengali script.
+   - Banglish/Romanized Bengali input -> ALWAYS answer in Bengali script.
    - Hindi script input -> answer in Hindi script.
-   - Hinglish/Romanized Hindi input -> answer in Hinglish using Latin/English letters.
+   - Hinglish/Romanized Hindi input -> answer in Hindi script.
    - English input -> answer in English.
-   - Mixed input -> answer in the dominant language/style of the user's wording.
-8. Do not translate the user's language into another language unless the user asks for translation.
+   - Mixed input containing Bengali/Banglish -> prefer Bengali script unless the user explicitly asks for English.
+8. Do not mirror Banglish/Romanized Bengali in the answer; convert it to natural Bengali script.
 9. Plain text only. Never use Markdown stars (** or *), backticks, # headings, or decorative Markdown.
 10. If the user asks for a crypto market chart/image, the bot generates the chart separately from live candle data. Never claim an arbitrary artistic/2D/3D image was generated unless an actual image-generation backend sends one.
 11. Market direction is analysis/scenario, not certainty or personalized investment advice.
@@ -759,6 +760,10 @@ def is_admin(telegram_id: int) -> bool:
 
 
 async def require_approved(update: Update) -> bool:
+    # Administrators never need an approval request, even if an older database
+    # record still has a non-approved status.
+    if is_admin(update.effective_user.id):
+        return True
     row=db_get_user(update.effective_user.id)
     if row is None:
         await update.message.reply_text(ui_text("pending",detect_language(update.message.text or ""))); return False
@@ -782,10 +787,7 @@ def format_admin_user_card(row):
     return f"👤 {row['first_name']}\nID: {row['telegram_id']}\nUsername: {uname}\nStatus: {row['status']}"
 
 def owner_signature_html() -> str:
-    return (
-        f'👑 Owner: <a href="{OWNER_TELEGRAM_URL}">{html_escape(OWNER_DISPLAY_NAME)}</a> '
-        f'(@{html_escape(OWNER_TELEGRAM_USERNAME)})'
-    )
+    return f'👑 Owner: <a href="{OWNER_TELEGRAM_URL}">{html_escape(OWNER_DISPLAY_NAME)}</a>'
 
 
 async def notify_admins(context, text, reply_markup=None, include_owner_signature: bool = True):
@@ -846,9 +848,24 @@ def admin_keyboard():
 # ==================================================
 async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     row=ensure_user_record(update); lang=detect_language(update.message.text or "")
-    if row["status"]=="approved": await update.message.reply_text(ui_text("welcome",lang))
+    # Administrators are always trusted and never see an approval request.
+    if is_admin(update.effective_user.id):
+        welcome = ui_text("welcome", lang) + "\n\n" + owner_signature_html()
+        await update.message.reply_text(
+            welcome, parse_mode=ParseMode.HTML, disable_web_page_preview=True
+        )
+        return
+
+    if row["status"]=="approved":
+        welcome = ui_text("welcome", lang) + "\n\n" + owner_signature_html()
+        await update.message.reply_text(
+            welcome, parse_mode=ParseMode.HTML, disable_web_page_preview=True
+        )
     elif row["status"]=="pending":
-        await update.message.reply_text(ui_text("pending",lang))
+        pending_text = ui_text("pending",lang) + "\n\n" + owner_signature_html()
+        await update.message.reply_text(
+            pending_text, parse_mode=ParseMode.HTML, disable_web_page_preview=True
+        )
         request_text = (
             "🆕 <b>New access request</b>\n"
             f"👤 Name: {html_escape(row['first_name'] or '(no name)')}\n"
@@ -861,8 +878,10 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         )
         request_text += "\n\nApprove or reject:"
         await notify_admins(context, request_text, pending_request_keyboard(row["telegram_id"]))
-    elif row["status"]=="blocked": await update.message.reply_text(ui_text("blocked",lang))
-    else: await update.message.reply_text(ui_text("rejected",lang))
+    elif row["status"]=="blocked":
+        await update.message.reply_text(ui_text("blocked",lang))
+    else:
+        await update.message.reply_text(ui_text("rejected",lang))
 
 
 async def help_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1560,18 +1579,6 @@ def generate_market_chart(
                            color=marker_color, edgecolor="white", linewidth=1.2,
                            zorder=10)
 
-                # Put the breakout label beside the candle only when there is
-                # room; otherwise place it in the central explanation area.
-                offset_y = 14 if marker == "^" else -22
-                ax.annotate(
-                    price_action.breakout_status,
-                    (idx, marker_y),
-                    xytext=(8, offset_y), textcoords="offset points",
-                    fontsize=9, fontweight="bold", color=marker_color,
-                    bbox=dict(boxstyle="round,pad=0.25", facecolor="white",
-                              edgecolor=marker_color, alpha=0.92),
-                    zorder=11,
-                )
 
         # Trade-plan levels are added only when the user explicitly asks for
         # a Long/Short plan.
@@ -1593,51 +1600,40 @@ def generate_market_chart(
                               edgecolor=color, alpha=0.88), zorder=9
                 )
 
-        # Explain WHY the AI drew each object. Prefer a genuinely empty
-        # central area; if the middle is occupied by candles, fall back toward
-        # the upper area. This keeps the left candle history unobstructed.
-        if price_action.drawing_reasons:
-            y_min = min(lows)
-            y_max = max(highs)
-            y_span = max(y_max - y_min, 1e-12)
-            x_span = max(len(x) - 1, 1)
-            box_h = y_span * (0.13 if len(price_action.drawing_reasons) <= 2 else 0.18)
-            box_w = max(18, int(x_span * 0.28))
-            candidates = [
-                (0.56, 0.48), (0.62, 0.58), (0.48, 0.62),
-                (0.70, 0.68), (0.52, 0.78), (0.72, 0.84),
-            ]
 
-            def overlap_score(cx_norm, cy_norm):
-                cx = cx_norm * x_span
-                cy = y_min + cy_norm * y_span
-                left = max(0, cx - box_w / 2)
-                right = min(x_span, cx + box_w / 2)
-                bottom = cy - box_h / 2
-                top = cy + box_h / 2
-                score = 0.0
-                for i in range(len(x)):
-                    if left <= i <= right and highs[i] >= bottom and lows[i] <= top:
-                        score += 1.0
-                # Prefer the middle when equally clear.
-                score += abs(cx_norm - 0.56) * 2.0
-                score += abs(cy_norm - 0.50) * 1.0
-                return score, cx, cy
+    # Keep all AI drawing explanations away from candles. Place the explanation
+    # in the largest practical blank area of the price panel, preferring the
+    # empty space below the candle range. If there is not enough room there,
+    # use the upper area instead.
+    if price_action and price_action.drawing_reasons:
+        candle_low = min(lows)
+        candle_high = max(highs)
+        price_range = max(candle_high - candle_low, 1e-9)
+        explanation_lines = ["AI DRAWING EXPLANATION"]
+        explanation_lines.extend(f"• {reason}" for reason in price_action.drawing_reasons[:4])
+        if price_action.breakout_status and price_action.breakout_status != "None":
+            explanation_lines.append(f"• Status: {price_action.breakout_status}")
+        explanation_text = "\n".join(explanation_lines)
 
-            best = min(candidates, key=lambda c: overlap_score(*c)[0])
-            _, tx, ty = overlap_score(*best)
-            explanation = "AI DRAWING EXPLANATION\n" + "\n".join(
-                f"• {reason}" for reason in price_action.drawing_reasons[:4]
+        # Prefer below the candle range. The y-position is data-based so it
+        # remains in a genuinely empty area across different coins/timeframes.
+        y_bottom = candle_low - 0.10 * price_range
+        y_top = candle_low - 0.02 * price_range
+        if y_bottom <= min(lows) - 0.04 * price_range:
+            y_text = candle_low - 0.07 * price_range
+        else:
+            y_text = candle_high + 0.08 * price_range
+
+        x_text = max(0.0, min(len(x) - 1, len(x) * 0.52))
+        ax.text(
+            x_text, y_text, explanation_text,
+            ha="center", va="center", fontsize=8.5, fontweight="bold",
+            color="#111827", zorder=12, clip_on=True,
+            bbox=dict(
+                boxstyle="round,pad=0.45", facecolor="white",
+                edgecolor="#2563eb", linewidth=1.6, alpha=0.94
             )
-            ax.text(
-                tx, ty, explanation,
-                transform=ax.transData,
-                ha="center", va="center", fontsize=9.2, fontweight="bold",
-                color="#111827", linespacing=1.35,
-                bbox=dict(boxstyle="round,pad=0.65", facecolor="white",
-                          edgecolor="#2563eb", linewidth=1.5, alpha=0.93),
-                zorder=20,
-            )
+        )
 
     if snapshot:
         price = float(snapshot.price)
@@ -1881,13 +1877,25 @@ async def process_text_query(update: Update, context: ContextTypes.DEFAULT_TYPE,
             await update.message.reply_photo(
                 photo=InputFile(chart_buf, filename="market_chart.png"),
             )
+            if price_action and price_action.drawing_reasons:
+                explanation_lines = ["📌 AI Chart Drawing Explanation"]
+                explanation_lines.extend(
+                    f"• {reason}" for reason in price_action.drawing_reasons[:6]
+                )
+                if price_action.breakout_status:
+                    explanation_lines.append(
+                        f"• Current structure/status: {price_action.breakout_status}"
+                    )
+                await update.message.reply_text("\n".join(explanation_lines))
         except Exception:
             logger.exception("Chart generation failed")
 
     # Explicitly tell the model what output language/script to use.
     context_block += (
         f"\nOUTPUT_LANGUAGE_REQUIREMENT: {LANGUAGE_NAMES.get(lang, 'English')}. "
-        "Match the user's script and language exactly; do not translate unless asked."
+        "If the user wrote Banglish/Romanized Bengali, output natural Bengali script. "
+        "If the user wrote Hinglish/Romanized Hindi, output natural Hindi script. "
+        "Do not output Banglish/Hinglish unless explicitly requested."
     )
 
     system_prompt = SYSTEM_PROMPT_TEMPLATE.format(
@@ -2255,12 +2263,15 @@ async def configure_bot_commands(app: Application) -> None:
 
     startup_text = (
         "🟢 <b>Crypto AI Telegram Assistant is ONLINE</b>\n\n"
-        "⚡ Binance market data: Connected\n"
-        f"🤖 AI Model: <code>{html_escape(GROQ_MODEL)}</code>\n"
-        "📊 Price Action Engine: Active\n"
-        "🕯️ Multi-timeframe candle analysis: Active\n"
-        "🛡️ Access control: Active\n\n"
-        "The bot is ready to receive requests.\n\n"
+        "🤖 এই AI যেসব কাজ করতে পারে:\n"
+        "• লাইভ ক্রিপ্টো মার্কেট ও প্রাইস বিশ্লেষণ\n"
+        "• Multi-timeframe candle analysis\n"
+        "• Support ও Resistance শনাক্তকরণ\n"
+        "• Trend Line, Channel ও Rectangle Zone analysis\n"
+        "• Breakout, Breakdown ও Retest analysis\n"
+        "• Chart annotation ও market-structure explanation\n"
+        "• প্রয়োজন হলে Long/Short setup, Stop Loss ও Target পরিকল্পনা\n\n"
+        "বট এখন আপনার রিকোয়েস্ট গ্রহণের জন্য প্রস্তুত।\n\n"
         f"{owner_signature_html()}"
     )
     for admin_id in ADMIN_TELEGRAM_IDS:
