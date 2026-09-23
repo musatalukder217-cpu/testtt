@@ -26,6 +26,7 @@ import sqlite3
 import asyncio
 import io
 import unicodedata
+from html import escape as html_escape
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -88,6 +89,11 @@ RATE_LIMIT_PER_MINUTE = int(_env("RATE_LIMIT_PER_MINUTE", "15"))
 BINANCE_BASE_URL = "https://api.binance.com"
 TELEGRAM_MESSAGE_LIMIT = 4096
 
+# Owner identity used only for bot/admin notifications.
+OWNER_DISPLAY_NAME = "—͞Tᴍ Mᴜsᴀ⚡️"
+OWNER_TELEGRAM_USERNAME = "tmmusa73"
+OWNER_TELEGRAM_URL = "https://t.me/tmmusa73"
+
 # ==================================================
 # LOGGING
 # ==================================================
@@ -126,6 +132,30 @@ def db_init() -> None:
                 status          TEXT DEFAULT 'pending',  -- pending | approved | rejected | blocked
                 created_at      TEXT DEFAULT (datetime('now')),
                 last_seen_at    TEXT DEFAULT (datetime('now'))
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS chat_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                telegram_id INTEGER NOT NULL,
+                role TEXT NOT NULL,
+                content TEXT NOT NULL,
+                created_at TEXT DEFAULT (datetime('now'))
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS user_market_context (
+                telegram_id INTEGER PRIMARY KEY,
+                symbol TEXT,
+                coin_name TEXT,
+                interval TEXT,
+                limit_count INTEGER,
+                timeframe_label TEXT,
+                updated_at TEXT DEFAULT (datetime('now'))
             )
             """
         )
@@ -173,6 +203,62 @@ def db_get_user(telegram_id: int) -> Optional[sqlite3.Row]:
     with db_connect() as conn:
         return conn.execute(
             "SELECT * FROM users WHERE telegram_id = ?", (telegram_id,)
+        ).fetchone()
+
+
+def db_save_chat_message(telegram_id: int, role: str, content: str) -> None:
+    content = (content or "").strip()
+    if not content:
+        return
+    # Keep stored history bounded so the single-file bot/database stays lightweight.
+    content = content[:8000]
+    with db_connect() as conn:
+        conn.execute(
+            "INSERT INTO chat_history (telegram_id, role, content) VALUES (?, ?, ?)",
+            (telegram_id, role, content),
+        )
+        conn.execute(
+            """
+            DELETE FROM chat_history
+            WHERE telegram_id = ? AND id NOT IN (
+                SELECT id FROM chat_history WHERE telegram_id = ?
+                ORDER BY id DESC LIMIT 20
+            )
+            """,
+            (telegram_id, telegram_id),
+        )
+        conn.commit()
+
+
+def db_get_chat_history(telegram_id: int, limit: int = 8) -> list[sqlite3.Row]:
+    with db_connect() as conn:
+        rows = conn.execute(
+            "SELECT role, content, created_at FROM chat_history WHERE telegram_id = ? ORDER BY id DESC LIMIT ?",
+            (telegram_id, max(1, min(limit, 20))),
+        ).fetchall()
+    return list(reversed(rows))
+
+
+def db_save_market_context(telegram_id: int, resolved: tuple[str, str], interval: str, limit_count: int, timeframe_label: str) -> None:
+    symbol, coin_name = resolved
+    with db_connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO user_market_context (telegram_id, symbol, coin_name, interval, limit_count, timeframe_label, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
+            ON CONFLICT(telegram_id) DO UPDATE SET
+                symbol=excluded.symbol, coin_name=excluded.coin_name, interval=excluded.interval,
+                limit_count=excluded.limit_count, timeframe_label=excluded.timeframe_label, updated_at=datetime('now')
+            """,
+            (telegram_id, symbol, coin_name, interval, limit_count, timeframe_label),
+        )
+        conn.commit()
+
+
+def db_get_market_context(telegram_id: int) -> Optional[sqlite3.Row]:
+    with db_connect() as conn:
+        return conn.execute(
+            "SELECT * FROM user_market_context WHERE telegram_id = ?", (telegram_id,)
         ).fetchone()
 
 
@@ -695,10 +781,28 @@ def format_admin_user_card(row):
     uname=f"@{row['username']}" if row["username"] else "(no username)"
     return f"👤 {row['first_name']}\nID: {row['telegram_id']}\nUsername: {uname}\nStatus: {row['status']}"
 
-async def notify_admins(context,text,reply_markup=None):
+def owner_signature_html() -> str:
+    return (
+        f'👑 Owner: <a href="{OWNER_TELEGRAM_URL}">{html_escape(OWNER_DISPLAY_NAME)}</a> '
+        f'(@{html_escape(OWNER_TELEGRAM_USERNAME)})'
+    )
+
+
+async def notify_admins(context, text, reply_markup=None, include_owner_signature: bool = True):
+    final_text = text
+    if include_owner_signature:
+        final_text = f"{text}\n\n{owner_signature_html()}"
     for admin_id in ADMIN_TELEGRAM_IDS:
-        try: await context.bot.send_message(chat_id=admin_id,text=text,reply_markup=reply_markup)
-        except Exception: logger.exception("Failed to notify admin %s",admin_id)
+        try:
+            await context.bot.send_message(
+                chat_id=admin_id,
+                text=final_text,
+                reply_markup=reply_markup,
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=True,
+            )
+        except Exception:
+            logger.exception("Failed to notify admin %s", admin_id)
 
 async def admin_callback_handler(update: Update,context: ContextTypes.DEFAULT_TYPE):
     q=update.callback_query
@@ -744,7 +848,19 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     row=ensure_user_record(update); lang=detect_language(update.message.text or "")
     if row["status"]=="approved": await update.message.reply_text(ui_text("welcome",lang))
     elif row["status"]=="pending":
-        await update.message.reply_text(ui_text("pending",lang)); await notify_admins(context,f"🆕 New access request:\n{format_user_row(row)}\n\nApprove or reject:",pending_request_keyboard(row["telegram_id"]))
+        await update.message.reply_text(ui_text("pending",lang))
+        request_text = (
+            "🆕 <b>New access request</b>\n"
+            f"👤 Name: {html_escape(row['first_name'] or '(no name)')}\n"
+            f"🆔 Telegram ID: <code>{row['telegram_id']}</code>\n"
+            f"🔗 Username: @{html_escape(row['username'])}" if row['username'] else
+            "🆕 <b>New access request</b>\n"
+            f"👤 Name: {html_escape(row['first_name'] or '(no name)')}\n"
+            f"🆔 Telegram ID: <code>{row['telegram_id']}</code>\n"
+            "🔗 Username: (no username)"
+        )
+        request_text += "\n\nApprove or reject:"
+        await notify_admins(context, request_text, pending_request_keyboard(row["telegram_id"]))
     elif row["status"]=="blocked": await update.message.reply_text(ui_text("blocked",lang))
     else: await update.message.reply_text(ui_text("rejected",lang))
 
@@ -894,9 +1010,13 @@ class PriceActionAnalysis:
     support: Optional[float] = None
     resistance: Optional[float] = None
     trend_line: Optional[tuple] = None          # ((x1,y1),(x2,y2))
+    trend_line_points: Optional[tuple] = None   # original swing points used for the line
     channel_upper: Optional[tuple] = None       # ((x1,y1),(x2,y2))
     channel_lower: Optional[tuple] = None
+    channel_upper_points: Optional[tuple] = None
+    channel_lower_points: Optional[tuple] = None
     rectangle_zone: Optional[tuple] = None      # (x1,x2,bottom,top)
+    drawing_reasons: list[str] = field(default_factory=list)
     breakout_status: str = "None"
     breakout_trigger: Optional[float] = None
     breakout_index: Optional[int] = None
@@ -997,6 +1117,9 @@ def analyze_price_action(klines: list) -> PriceActionAnalysis:
 
     upper_line = lower_line = None
     trend_line = None
+    trend_line_points = None
+    channel_upper_points = None
+    channel_lower_points = None
     channel_height = None
 
     if len(recent_highs) >= 2 and len(recent_lows) >= 2:
@@ -1015,20 +1138,26 @@ def analyze_price_action(klines: list) -> PriceActionAnalysis:
             lower_at_end = _line_value(lower, n - 1)
             if parallel and upper_at_end > lower_at_end:
                 upper_line, lower_line = upper, lower
+                channel_upper_points = tuple(upper_points)
+                channel_lower_points = tuple(lower_points)
                 channel_height = upper_at_end - lower_at_end
 
     if channel_height is None:
         if trend == "Bullish" and len(recent_lows) >= 2:
-            trend_line = _line_from_points(*recent_lows[-2:])
+            trend_line_points = tuple(recent_lows[-2:])
+            trend_line = _line_from_points(*trend_line_points)
         elif trend == "Bearish" and len(recent_highs) >= 2:
-            trend_line = _line_from_points(*recent_highs[-2:])
+            trend_line_points = tuple(recent_highs[-2:])
+            trend_line = _line_from_points(*trend_line_points)
         else:
             # A directional line can still be useful if the latest two swings
             # clearly point in the same direction.
             if len(recent_lows) >= 2 and recent_lows[-1][1] > recent_lows[-2][1]:
-                trend_line = _line_from_points(*recent_lows[-2:])
+                trend_line_points = tuple(recent_lows[-2:])
+                trend_line = _line_from_points(*trend_line_points)
             elif len(recent_highs) >= 2 and recent_highs[-1][1] < recent_highs[-2][1]:
-                trend_line = _line_from_points(*recent_highs[-2:])
+                trend_line_points = tuple(recent_highs[-2:])
+                trend_line = _line_from_points(*trend_line_points)
 
     # Rectangle only when price has recently compressed into a reasonably
     # defined range with repeated interaction. Do not draw it when a clear
@@ -1049,6 +1178,22 @@ def analyze_price_action(klines: list) -> PriceActionAnalysis:
         if top_touches >= 2 and bottom_touches >= 2:
             rectangle_zone = (n - lookback, n - 1, zone_bottom, zone_top)
             support, resistance = zone_bottom, zone_top
+
+    drawing_reasons = []
+    if channel_upper_points and channel_lower_points:
+        if trend == "Bullish":
+            drawing_reasons.append("AI Channel: repeated higher highs and higher lows formed two reasonably parallel rising boundaries.")
+        elif trend == "Bearish":
+            drawing_reasons.append("AI Channel: repeated lower highs and lower lows formed two reasonably parallel falling boundaries.")
+        else:
+            drawing_reasons.append("AI Channel: repeated swing highs and lows formed two reasonably parallel price boundaries.")
+    elif trend_line_points:
+        if trend == "Bullish" or trend_line_points[-1][1] > trend_line_points[0][1]:
+            drawing_reasons.append("AI Trend Line: it connects rising swing lows to track dynamic support and trend direction.")
+        else:
+            drawing_reasons.append("AI Trend Line: it connects falling swing highs to track dynamic resistance and trend direction.")
+    if rectangle_zone:
+        drawing_reasons.append("AI Rectangle: price repeatedly interacted with a defined range, so the area is treated as a zone rather than a single price level.")
 
     last_close = closes[-1]
     prev_close = closes[-2]
@@ -1147,6 +1292,15 @@ def analyze_price_action(klines: list) -> PriceActionAnalysis:
     else:
         reason = "Price pierced the boundary but did not close beyond it, so the move is not treated as a confirmed breakout/breakdown."
 
+    if "Bullish Breakout" == breakout_status:
+        drawing_reasons.append(f"Breakout: candle closed above {breakout_trigger:.8g}; this is the boundary that was being tested.")
+    elif "Bearish Breakdown" == breakout_status:
+        drawing_reasons.append(f"Breakdown: candle closed below {breakout_trigger:.8g}; this is the boundary that was being tested.")
+    elif "Potential / False Breakout" == breakout_status:
+        drawing_reasons.append(f"Breakout warning: price pierced {breakout_trigger:.8g} but did not close above it, so confirmation is absent.")
+    elif "Potential / False Breakdown" == breakout_status:
+        drawing_reasons.append(f"Breakdown warning: price pierced {breakout_trigger:.8g} but did not close below it, so confirmation is absent.")
+
     # Confidence is based on structural evidence, not a forecast probability.
     evidence = 0
     if len(recent_highs) >= 2:
@@ -1166,9 +1320,13 @@ def analyze_price_action(klines: list) -> PriceActionAnalysis:
         support=support,
         resistance=resistance,
         trend_line=trend_line,
+        trend_line_points=trend_line_points,
         channel_upper=upper_line,
         channel_lower=lower_line,
+        channel_upper_points=channel_upper_points,
+        channel_lower_points=channel_lower_points,
         rectangle_zone=rectangle_zone,
+        drawing_reasons=drawing_reasons,
         breakout_status=breakout_status,
         breakout_trigger=breakout_trigger,
         breakout_index=breakout_index,
@@ -1199,6 +1357,7 @@ def build_price_action_context(analysis: PriceActionAnalysis, closes: list[float
         f"projected_target={fmt(analysis.projected_target)}",
         f"structure_confidence={analysis.confidence}",
         f"engine_reason={analysis.reason}",
+        "drawing_reasons=" + " | ".join(analysis.drawing_reasons),
         "IMPORTANT: A wick through a level is not a confirmed breakout/breakdown. "
         "Use candle-body close and follow-through/retest logic.",
         "Tool selection rule: Horizontal Line = specific level; Trend Line = directional swings; "
@@ -1338,22 +1497,33 @@ def generate_market_chart(
 
     # New autonomous price-action drawings.
     if price_action:
-        # Trend line: project the detected directional line to the visible chart end.
+        # Draw only from the real swing anchors. The previous version projected
+        # lines all the way back to x=0, which could create misleading empty
+        # lines across the left side of the chart and hide candles.
         if price_action.trend_line:
             line = price_action.trend_line
-            xs = [0, len(x) - 1]
+            points = price_action.trend_line_points
+            if points:
+                start_x = max(0, int(points[0][0]))
+                end_x = len(x) - 1
+            else:
+                start_x = 0
+                end_x = len(x) - 1
+            xs = [start_x, end_x]
             ys = [_line_value(line, xi) for xi in xs]
             ax.plot(xs, ys, color="#7c3aed", linewidth=2.4, linestyle="-",
                     label="AI Trend Line", zorder=7)
 
-        # Parallel channel: both boundaries are drawn only when the engine
-        # found enough swing evidence for a reasonably parallel structure.
+        # Parallel channel: draw from the first real swing anchor to the
+        # current chart edge instead of projecting backward into empty space.
         if price_action.channel_upper and price_action.channel_lower:
-            for line, label in (
-                (price_action.channel_upper, "AI Channel Resistance"),
-                (price_action.channel_lower, "AI Channel Support"),
-            ):
-                xs = [0, len(x) - 1]
+            channel_specs = [
+                (price_action.channel_upper, price_action.channel_upper_points, "AI Channel Resistance"),
+                (price_action.channel_lower, price_action.channel_lower_points, "AI Channel Support"),
+            ]
+            for line, points, label in channel_specs:
+                start_x = max(0, int(points[0][0])) if points else 0
+                xs = [start_x, len(x) - 1]
                 ys = [_line_value(line, xi) for xi in xs]
                 ax.plot(xs, ys, color="#2563eb", linewidth=2.3,
                         linestyle="-", label=label, zorder=7)
@@ -1372,10 +1542,6 @@ def generate_market_chart(
         # Breakout/breakdown trigger and the exact candle that crossed it.
         if price_action.breakout_trigger is not None:
             trigger = float(price_action.breakout_trigger)
-            ax.axhline(
-                trigger, color="#111827", linestyle=":", linewidth=2.0,
-                alpha=0.95, zorder=8
-            )
             idx = price_action.breakout_index
             if idx is not None and 0 <= idx < len(x):
                 if "Bullish" in price_action.breakout_status:
@@ -1393,11 +1559,14 @@ def generate_market_chart(
                 ax.scatter([idx], [marker_y], s=90, marker=marker,
                            color=marker_color, edgecolor="white", linewidth=1.2,
                            zorder=10)
+
+                # Put the breakout label beside the candle only when there is
+                # room; otherwise place it in the central explanation area.
+                offset_y = 14 if marker == "^" else -22
                 ax.annotate(
                     price_action.breakout_status,
                     (idx, marker_y),
-                    xytext=(8, 12 if marker == "^" else -18),
-                    textcoords="offset points",
+                    xytext=(8, offset_y), textcoords="offset points",
                     fontsize=9, fontweight="bold", color=marker_color,
                     bbox=dict(boxstyle="round,pad=0.25", facecolor="white",
                               edgecolor=marker_color, alpha=0.92),
@@ -1423,6 +1592,52 @@ def generate_market_chart(
                     bbox=dict(boxstyle="round,pad=0.22", facecolor="white",
                               edgecolor=color, alpha=0.88), zorder=9
                 )
+
+        # Explain WHY the AI drew each object. Prefer a genuinely empty
+        # central area; if the middle is occupied by candles, fall back toward
+        # the upper area. This keeps the left candle history unobstructed.
+        if price_action.drawing_reasons:
+            y_min = min(lows)
+            y_max = max(highs)
+            y_span = max(y_max - y_min, 1e-12)
+            x_span = max(len(x) - 1, 1)
+            box_h = y_span * (0.13 if len(price_action.drawing_reasons) <= 2 else 0.18)
+            box_w = max(18, int(x_span * 0.28))
+            candidates = [
+                (0.56, 0.48), (0.62, 0.58), (0.48, 0.62),
+                (0.70, 0.68), (0.52, 0.78), (0.72, 0.84),
+            ]
+
+            def overlap_score(cx_norm, cy_norm):
+                cx = cx_norm * x_span
+                cy = y_min + cy_norm * y_span
+                left = max(0, cx - box_w / 2)
+                right = min(x_span, cx + box_w / 2)
+                bottom = cy - box_h / 2
+                top = cy + box_h / 2
+                score = 0.0
+                for i in range(len(x)):
+                    if left <= i <= right and highs[i] >= bottom and lows[i] <= top:
+                        score += 1.0
+                # Prefer the middle when equally clear.
+                score += abs(cx_norm - 0.56) * 2.0
+                score += abs(cy_norm - 0.50) * 1.0
+                return score, cx, cy
+
+            best = min(candidates, key=lambda c: overlap_score(*c)[0])
+            _, tx, ty = overlap_score(*best)
+            explanation = "AI DRAWING EXPLANATION\n" + "\n".join(
+                f"• {reason}" for reason in price_action.drawing_reasons[:4]
+            )
+            ax.text(
+                tx, ty, explanation,
+                transform=ax.transData,
+                ha="center", va="center", fontsize=9.2, fontweight="bold",
+                color="#111827", linespacing=1.35,
+                bbox=dict(boxstyle="round,pad=0.65", facecolor="white",
+                          edgecolor="#2563eb", linewidth=1.5, alpha=0.93),
+                zorder=20,
+            )
 
     if snapshot:
         price = float(snapshot.price)
@@ -1508,6 +1723,15 @@ async def process_text_query(update: Update, context: ContextTypes.DEFAULT_TYPE,
     if not resolved and uid in LAST_MARKET_CONTEXT:
         # Natural follow-up: "এইটা চার্ট দাও", "support resistance দেখাও" etc.
         resolved = LAST_MARKET_CONTEXT[uid].get("resolved")
+    if not resolved:
+        # Restore the last requested market from SQLite after restart, so follow-ups
+        # such as "এটার চার্ট দাও" do not lose the previous coin context.
+        saved_market = db_get_market_context(uid)
+        if saved_market and saved_market["symbol"]:
+            resolved = (saved_market["symbol"], saved_market["coin_name"] or saved_market["symbol"])
+            candle_interval = saved_market["interval"] or candle_interval
+            candle_limit = int(saved_market["limit_count"] or candle_limit)
+            timeframe_label = saved_market["timeframe_label"] or timeframe_label
 
     snapshot = None
     ta = None
@@ -1527,6 +1751,7 @@ async def process_text_query(update: Update, context: ContextTypes.DEFAULT_TYPE,
                 "ta": ta,
                 "klines": klines,
             }
+            db_save_market_context(uid, resolved, candle_interval, candle_limit, timeframe_label)
         except BinanceError as exc:
             logger.warning("Binance lookup failed for %s: %s", symbol, exc)
 
@@ -1568,6 +1793,17 @@ async def process_text_query(update: Update, context: ContextTypes.DEFAULT_TYPE,
             logger.exception("Trade-plan calculation failed")
 
     context_block = build_context_block(text, lang, coin_name, snapshot, ta)
+    previous_history = db_get_chat_history(uid, limit=8)
+    if previous_history:
+        history_lines = ["PREVIOUS_CONVERSATION_CONTEXT:"]
+        for item in previous_history:
+            history_lines.append(f"{item['role'].upper()}: {item['content']}")
+        context_block += "\n" + "\n".join(history_lines)
+        context_block += (
+            "\nUse this previous conversation only to resolve references such as 'this coin', "
+            "'the previous chart', 'that breakout', or follow-up questions. "
+            "For current prices/market data, always use the newly fetched live data.\n"
+        )
     if klines:
         closes_for_context = [float(k[4]) for k in klines[-120:]]
         context_block += "\n" + build_price_action_context(price_action, closes_for_context)
@@ -1657,6 +1893,7 @@ async def process_text_query(update: Update, context: ContextTypes.DEFAULT_TYPE,
     system_prompt = SYSTEM_PROMPT_TEMPLATE.format(
         language_name=LANGUAGE_NAMES.get(lang, "English")
     )
+    db_save_chat_message(uid, "user", text)
     try:
         reply = await ask_groq(system_prompt, context_block)
     except Exception:
@@ -1666,7 +1903,9 @@ async def process_text_query(update: Update, context: ContextTypes.DEFAULT_TYPE,
         )
         return
 
-    await reply_long(update, reply or "No response generated.")
+    final_reply = reply or "No response generated."
+    db_save_chat_message(uid, "assistant", final_reply)
+    await reply_long(update, final_reply)
 
 
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2013,6 +2252,27 @@ async def configure_bot_commands(app: Application) -> None:
     await app.bot.set_my_commands([BotCommand("start","Start")],scope=BotCommandScopeDefault())
     for admin_id in ADMIN_TELEGRAM_IDS:
         await app.bot.set_my_commands([BotCommand("start","Start"),BotCommand("admin","Admin Panel"),BotCommand("approved","Approved Users"),BotCommand("pending","Pending Requests"),BotCommand("broadcast","Broadcast"),BotCommand("stats","Bot Stats")],scope=BotCommandScopeChat(chat_id=admin_id))
+
+    startup_text = (
+        "🟢 <b>Crypto AI Telegram Assistant is ONLINE</b>\n\n"
+        "⚡ Binance market data: Connected\n"
+        f"🤖 AI Model: <code>{html_escape(GROQ_MODEL)}</code>\n"
+        "📊 Price Action Engine: Active\n"
+        "🕯️ Multi-timeframe candle analysis: Active\n"
+        "🛡️ Access control: Active\n\n"
+        "The bot is ready to receive requests.\n\n"
+        f"{owner_signature_html()}"
+    )
+    for admin_id in ADMIN_TELEGRAM_IDS:
+        try:
+            await app.bot.send_message(
+                chat_id=admin_id,
+                text=startup_text,
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=True,
+            )
+        except Exception:
+            logger.exception("Failed to send startup notification to admin %s", admin_id)
 
 def build_application() -> Application:
     app=ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).post_init(configure_bot_commands).build()
