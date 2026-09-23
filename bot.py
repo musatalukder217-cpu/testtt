@@ -560,6 +560,56 @@ def is_crypto_query(text: str) -> bool:
     return True
 
 
+GLOBAL_METRIC_PATTERNS = {
+    "total_market_cap": (
+        "total market cap", "total market capitalization", "global market cap",
+        "মোট মার্কেট ক্যাপ", "গ্লোবাল মার্কেট ক্যাপ", "মোট মার্কেট ক্যাপিটালাইজেশন",
+    ),
+    "total2": ("total2", "total 2", "total-2", "টোটাল২", "টোটাল ২", "টোটাল-২"),
+    "total3": ("total3", "total 3", "total-3", "টোটাল৩", "টোটাল ৩", "টোটাল-৩"),
+    "others": ("others", "other market cap", "others market cap", "অদার্স", "অন্য কয়েন", "অন্য কয়েন"),
+    "btc_dominance": (
+        "btc.d", "btc dominance", "bitcoin dominance", "btc dominancy",
+        "বিটকয়েন ডমিনেন্স", "বিটকয়েন ডমিনেন্স", "বিটকয়েনের ডমিনেন্স", "বিটকয়েনের ডমিনেন্স",
+    ),
+    "eth_dominance": (
+        "eth.d", "eth dominance", "ethereum dominance", "eth dominancy",
+        "ইথেরিয়াম ডমিনেন্স", "ইথেরিয়াম ডমিনেন্স", "ইথেরিয়ামের ডমিনেন্স", "ইথেরিয়ামের ডমিনেন্স",
+    ),
+    "usdt_dominance": (
+        "usdt.d", "usdt dominance", "tether dominance", "usdt dominancy",
+        "usdt ডমিনেন্স", "ইউএসডিটি ডমিনেন্স",
+    ),
+    "usdc_dominance": (
+        "usdc.d", "usdc dominance", "usdc dominancy", "usdc ডমিনেন্স",
+    ),
+    "total_volume": (
+        "total volume", "global volume", "market volume", "মোট ভলিউম", "গ্লোবাল ভলিউম",
+        "মার্কেট ভলিউম", "মার্কেটের ভলিউম",
+    ),
+    "active_cryptocurrencies": (
+        "active cryptocurrencies", "number of cryptocurrencies", "কতগুলো কয়েন",
+        "কতগুলো কয়েন", "কয়েনের সংখ্যা", "কয়েনের সংখ্যা",
+    ),
+    "market_breadth": (
+        "gainers losers", "gainers and losers", "market breadth", "গেইনার লুজার",
+        "গেইনার লসার", "গেইনার এবং লুজার", "গেইনার আর লুজার",
+    ),
+}
+
+def detect_global_market_target(text: str) -> Optional[str]:
+    t = normalize_user_text(text)
+    # More specific metric names must win over the generic word "total".
+    for target in (
+        "btc_dominance", "eth_dominance", "usdt_dominance", "usdc_dominance",
+        "total_market_cap", "total2", "total3", "others", "total_volume",
+        "active_cryptocurrencies", "market_breadth",
+    ):
+        if any(term in t for term in GLOBAL_METRIC_PATTERNS[target]):
+            return target
+    return None
+
+
 def extract_symbol(text: str) -> Optional[tuple[str, str]]:
     t = normalize_user_text(text)
     for alias in sorted(COIN_ALIASES, key=len, reverse=True):
@@ -668,6 +718,12 @@ STRICT RULES:
 16. For breakout/breakdown analysis, explain the trigger level, required candle-close condition, timeframe, retest condition when applicable, and invalidation condition. Describe future moves as conditional scenarios, never as guaranteed timing or certainty.
 17. Never proactively tell the user to take a Long or Short position and never present Long/Short as the default next action. Only provide a Long or Short trade setup when the user explicitly asks for that specific setup. When explicitly requested, use the supplied live OHLCV and price-action structure to produce a conditional Entry, Stop Loss, TP1, TP2, TP3, invalidation level, and risk/reward values. Do not invent current prices.
 18. When a chart is requested, the bot may send an annotated chart image and a separate written explanation beneath it. The written explanation must match the actual drawings and detected structure. Never place the AI drawing explanation text inside the chart image.
+19. CURRENT QUERY HAS ABSOLUTE PRIORITY OVER PREVIOUS CONVERSATION. If the user explicitly names a new asset, metric, index, or market concept, answer that exact target. Never assume the next message is related to the previous coin or metric merely because it was discussed before. Previous conversation context may only resolve genuinely ambiguous references such as 'this', 'that', 'same coin', or 'previous chart'.
+20. Recognize crypto-market terminology and aliases, including BTC, ETH, BNB, SOL, XRP, BTC.D, ETH.D, USDT.D, USDC.D, TOTAL, TOTAL2, TOTAL3, OTHERS, altcoin market cap, stablecoin market cap, total market cap, total volume, market breadth, gainers, losers, open interest, funding rate, liquidation, fear & greed, dominance, circulating supply, fully diluted valuation (FDV), TVL, DeFi, NFTs, L1/L2, DEX/CEX, spot, futures, perpetuals, and order-book/liquidity concepts.
+21. TOTAL means broad total crypto market capitalization; TOTAL2 means total market capitalization excluding BTC; TOTAL3 means total market capitalization excluding BTC and ETH. OTHERS is platform/index-specific and must not be falsely presented as an exact universal value. When exact OTHERS data is unavailable, clearly label the broad BTC+ETH-excluded market-cap figure as an approximation or TOTAL3 rather than pretending it is the exact OTHERS index.
+21A. TOTAL, TOTAL2, and TOTAL3 are market-cap indices/aggregates, not individual coins with a normal coin price. If a user asks for their "price", interpret the request as asking for the current index/market-cap value unless they clearly mean a chart price.
+22. Dominance means market-cap share, not money flow. BTC.D = BTC market cap / total crypto market cap × 100. ETH.D is analogous. A rise or fall in dominance must not automatically be described as money entering or leaving the market.
+23. If the user asks for a market metric that is not available in live context, say which live field is unavailable. Never substitute a previous coin's price or an unrelated metric.
 """
 
 LANGUAGE_NAMES = {"en": "English", "bn": "Bengali (বাংলা)", "hi": "Hindi (हिन्दी)", "bn_latn": "Banglish (Bengali written with Latin/English letters)", "hi_latn": "Hinglish (Hindi written with Latin/English letters)"}
@@ -1728,8 +1784,8 @@ def generate_market_chart(
             ax.axhline(level, color=color, linestyle=style, linewidth=2.8, alpha=0.98, zorder=5)
             ax.annotate(
                 f"{label}  ${level:,.2f}",
-                xy=(len(x)+4, level),
-                ha="left", va="center", fontsize=9, fontweight="bold", color=color,
+                xy=(len(x)-1, level), xytext=(-8, 0), textcoords="offset points",
+                ha="right", va="center", fontsize=9, fontweight="bold", color=color,
                 bbox=dict(boxstyle="round,pad=0.25", facecolor="white", edgecolor=color, alpha=0.90),
                 zorder=6,
             )
@@ -1814,8 +1870,8 @@ def generate_market_chart(
                 ax.axhline(level, color=color, linestyle="--", linewidth=1.8, alpha=0.85, zorder=6)
                 ax.annotate(
                     f"{label} ${level:,.4f}",
-                    xy=(len(x)+4, level),
-                    ha="left", va="center", fontsize=8.5, fontweight="bold", color=color,
+                    xy=(len(x)-1, level), xytext=(-8, 0), textcoords="offset points",
+                    ha="right", va="center", fontsize=8.5, fontweight="bold", color=color,
                     bbox=dict(boxstyle="round,pad=0.22", facecolor="white",
                               edgecolor=color, alpha=0.88), zorder=9
                 )
@@ -1826,8 +1882,8 @@ def generate_market_chart(
         ax.axhline(price, color="#2563eb", linestyle=":", linewidth=2.6, alpha=0.98, zorder=5)
         ax.annotate(
             f"Current Price  ${price:,.2f}",
-            xy=(len(x)+4, price),
-            ha="left", va="center", fontsize=9, fontweight="bold", color="#2563eb",
+            xy=(len(x)-1, price), xytext=(-8, 15), textcoords="offset points",
+            ha="right", va="bottom", fontsize=9, fontweight="bold", color="#2563eb",
             bbox=dict(boxstyle="round,pad=0.25", facecolor="white", edgecolor="#2563eb", alpha=0.90),
             zorder=6,
         )
@@ -1841,8 +1897,6 @@ def generate_market_chart(
         fontsize=15, fontweight="bold"
     )
     ax.set_ylabel("Price (USDT)")
-    # Keep all price labels in a clean right-side margin so they do not cover candles.
-    ax.set_xlim(-1, len(x) + 10)
     ax.grid(alpha=0.18)
     av.set_ylabel("Volume")
     av.grid(alpha=0.10)
@@ -1906,9 +1960,11 @@ async def process_text_query(update: Update, context: ContextTypes.DEFAULT_TYPE,
         chat_id=update.effective_chat.id, action=ChatAction.TYPING
     )
 
-    resolved = extract_symbol(text)
-    if not resolved and uid in LAST_MARKET_CONTEXT:
-        # Natural follow-up: "এইটা চার্ট দাও", "support resistance দেখাও" etc.
+    global_target = detect_global_market_target(text)
+    resolved = None if global_target else extract_symbol(text)
+    if not resolved and not global_target and uid in LAST_MARKET_CONTEXT:
+        # Natural follow-up is allowed only when the current message does not
+        # explicitly name a global market metric. The current query always wins.
         resolved = LAST_MARKET_CONTEXT[uid].get("resolved")
 
     # Resolve an explicitly requested timeframe first. If the user did not
@@ -1924,7 +1980,7 @@ async def process_text_query(update: Update, context: ContextTypes.DEFAULT_TYPE,
     ))
     candle_interval, candle_limit, timeframe_label = requested_interval, requested_limit, requested_label
 
-    if not explicit_timeframe:
+    if not explicit_timeframe and not global_target:
         saved_market = db_get_market_context(uid)
         if saved_market and saved_market["symbol"]:
             if not resolved:
@@ -1992,17 +2048,21 @@ async def process_text_query(update: Update, context: ContextTypes.DEFAULT_TYPE,
             logger.exception("Trade-plan calculation failed")
 
     context_block = build_context_block(text, lang, coin_name, snapshot, ta)
-    previous_history = db_get_chat_history(uid, limit=8)
-    if previous_history:
-        history_lines = ["PREVIOUS_CONVERSATION_CONTEXT:"]
-        for item in previous_history:
-            history_lines.append(f"{item['role'].upper()}: {item['content']}")
-        context_block += "\n" + "\n".join(history_lines)
-        context_block += (
-            "\nUse this previous conversation only to resolve references such as 'this coin', "
-            "'the previous chart', 'that breakout', or follow-up questions. "
-            "For current prices/market data, always use the newly fetched live data.\n"
-        )
+    # Previous chat history is useful for genuinely ambiguous follow-ups, but
+    # it must not override an explicitly named current metric.
+    if not global_target:
+        previous_history = db_get_chat_history(uid, limit=8)
+        if previous_history:
+            history_lines = ["PREVIOUS_CONVERSATION_CONTEXT:"]
+            for item in previous_history:
+                history_lines.append(f"{item['role'].upper()}: {item['content']}")
+            context_block += "\n" + "\n".join(history_lines)
+            context_block += (
+                "\nUse previous conversation ONLY to resolve genuinely ambiguous references "
+                "such as 'this coin', 'the previous chart', 'that breakout', or 'same one'. "
+                "The current USER_QUERY always has priority over previous messages. "
+                "For current prices/market data, always use newly fetched live data.\n"
+            )
     if klines:
         closes_for_context = [float(k[4]) for k in klines[-120:]]
         context_block += "\n" + build_price_action_context(price_action, closes_for_context)
@@ -2023,27 +2083,46 @@ async def process_text_query(update: Update, context: ContextTypes.DEFAULT_TYPE,
             "Do not say candle/OHLC data is unavailable when this line is present."
         )
 
-    # Supply global market context when the user asks about TOTAL/TOTAL2/TOTAL3,
-    # dominance, total market cap, or the overall crypto market.
-    global_terms = (
+    # Supply comprehensive global market context for explicit market-metric
+    # questions. This block is target-aware so "TOTAL2 price" cannot inherit
+    # the previous BTC/ETH context by mistake.
+    if global_target or any(term in normalized for term in (
         "total", "total2", "total 2", "total3", "total 3", "btc.d", "eth.d",
-        "dominance", "ডমিনেন্স", "মার্কেট ক্যাপ", "global market", "গ্লোবাল মার্কেট",
-        "ক্রিপ্টো মার্কেট", "crypto market", "overall market",
-    )
-    if any(term in normalized for term in global_terms):
+        "usdt.d", "usdc.d", "dominance", "ডমিনেন্স", "মার্কেট ক্যাপ",
+        "global market", "গ্লোবাল মার্কেট", "ক্রিপ্টো মার্কেট", "crypto market",
+        "overall market", "মোট মার্কেট", "মার্কেট ভলিউম", "গেইনার", "লুজার",
+    )):
         try:
             gm = await get_global_market_context()
             context_block += (
-                "\nGLOBAL_MARKET_DATA: "
-                f"total_market_cap={gm['total_market_cap_usd']} USD; "
-                f"TOTAL2_approx={gm['total2_market_cap_usd']} USD; "
-                f"TOTAL3_approx={gm['total3_market_cap_usd']} USD; "
-                f"BTC_dominance={gm['btc_dominance']}%; "
-                f"ETH_dominance={gm['eth_dominance']}%; "
-                f"24h_global_market_cap_change={gm['market_cap_change_24h_pct']}%. "
-                "TOTAL2/TOTAL3 are calculated from total market cap and dominance, "
-                "so label them as approximate when reporting them."
+                "\nGLOBAL_CRYPTO_MARKET_CONTEXT: "
+                f"target={global_target or 'general_global_market'}; "
+                f"TOTAL={gm['total_market_cap_usd']} USD; "
+                f"TOTAL2={gm['total2_market_cap_usd']} USD (broad ex-BTC); "
+                f"TOTAL3={gm['total3_market_cap_usd']} USD (broad ex-BTC-ETH); "
+                f"BTC_market_cap={gm['btc_market_cap_usd']} USD; "
+                f"ETH_market_cap={gm['eth_market_cap_usd']} USD; "
+                f"BTC_price={gm['btc_price_usd']} USD; ETH_price={gm['eth_price_usd']} USD; "
+                f"BTC_24h_change={gm['btc_24h_change_pct']}%; ETH_24h_change={gm['eth_24h_change_pct']}%; "
+                f"BTC_D={gm['btc_dominance']}%; ETH_D={gm['eth_dominance']}%; "
+                f"USDT_market_cap={gm['usdt_market_cap_usd']} USD; "
+                f"USDC_market_cap={gm['usdc_market_cap_usd']} USD; "
+                f"USDT_D={gm['usdt_dominance']}%; USDC_D={gm['usdc_dominance']}%; "
+                f"TOTAL_volume_24h={gm['total_volume_usd']} USD; "
+                f"global_market_cap_change_24h={gm['market_cap_change_24h_pct']}%; "
+                f"active_cryptocurrencies={gm['active_cryptocurrencies']}; markets={gm['markets']}; "
+                f"market_breadth={gm.get('market_breadth', {})}; "
+                f"OTHERS_NOTE={gm['others_note']}"
             )
+            if global_target:
+                context_block += (
+                    "\nTARGET_PRIORITY: The user explicitly asked for global metric "
+                    f"'{global_target}'. Answer that metric first. Do not answer with the "
+                    "previous coin's price or previous conversation topic. "
+                    "If the requested metric is OTHERS, explain that exact OTHERS is "
+                    "index-provider-specific and use the supplied broad ex-BTC/ex-ETH "
+                    "figure only as an explicitly labeled approximation."
+                )
         except Exception:
             logger.exception("Global market context lookup failed")
 
@@ -2262,12 +2341,12 @@ async def coingecko_global() -> dict:
 
 
 async def coingecko_global_markets() -> dict:
-    """Return global market data plus dominance information."""
+    """Return live global crypto metrics from CoinGecko."""
     data = await coingecko_global()
     market = data.get("data", {})
-    total_market_cap = market.get("total_market_cap", {})
-    total_volume = market.get("total_volume", {})
-    market_cap_percentage = market.get("market_cap_percentage", {})
+    total_market_cap = market.get("total_market_cap", {}) or {}
+    total_volume = market.get("total_volume", {}) or {}
+    market_cap_percentage = market.get("market_cap_percentage", {}) or {}
     return {
         "total_market_cap_usd": total_market_cap.get("usd"),
         "total_volume_usd": total_volume.get("usd"),
@@ -2276,21 +2355,105 @@ async def coingecko_global_markets() -> dict:
         "active_cryptocurrencies": market.get("active_cryptocurrencies"),
         "markets": market.get("markets"),
         "market_cap_change_24h_pct": market.get("market_cap_change_percentage_24h_usd"),
+        "market_cap_percentage": market_cap_percentage,
+    }
+
+
+async def coingecko_key_market_assets() -> dict:
+    """Fetch key asset market caps used to make TOTAL2/TOTAL3 and stablecoin metrics less ambiguous."""
+    headers = {}
+    if COINGECKO_API_KEY:
+        headers["x-cg-demo-api-key"] = COINGECKO_API_KEY
+    params = {
+        "vs_currency": "usd",
+        "ids": "bitcoin,ethereum,tether,usd-coin",
+        "order": "market_cap_desc",
+        "per_page": 10,
+        "page": 1,
+        "sparkline": "false",
+    }
+    rows = await _generic_get(f"{COINGECKO_BASE_URL}/coins/markets", params=params, headers=headers)
+    return {str(r.get("id")): r for r in (rows or [])}
+
+
+async def coingecko_market_breadth() -> dict:
+    """Return simple top-market breadth counts from live CoinGecko market data."""
+    headers = {}
+    if COINGECKO_API_KEY:
+        headers["x-cg-demo-api-key"] = COINGECKO_API_KEY
+    params = {
+        "vs_currency": "usd", "order": "market_cap_desc", "per_page": 100,
+        "page": 1, "sparkline": "false",
+    }
+    rows = await _generic_get(f"{COINGECKO_BASE_URL}/coins/markets", params=params, headers=headers)
+    changes = [float(r.get("price_change_percentage_24h") or 0) for r in (rows or [])]
+    return {
+        "top100_gainers": sum(1 for x in changes if x > 0),
+        "top100_losers": sum(1 for x in changes if x < 0),
+        "top100_flat": sum(1 for x in changes if x == 0),
     }
 
 
 async def get_global_market_context() -> dict:
-    """Build live global metrics including TOTAL/TOTAL2/TOTAL3 approximations."""
+    """Build a comprehensive live global crypto context for metric-specific questions."""
+    cache_key = "coingecko:global:comprehensive"
+    cached = market_cache.get(cache_key)
+    if cached is not None:
+        return cached
+
     m = await coingecko_global_markets()
     total = float(m.get("total_market_cap_usd") or 0)
     btc_d = float(m.get("btc_dominance") or 0)
     eth_d = float(m.get("eth_dominance") or 0)
-    return {
+
+    try:
+        assets = await coingecko_key_market_assets()
+    except Exception:
+        logger.exception("Key market asset lookup failed")
+        assets = {}
+
+    btc = assets.get("bitcoin", {})
+    eth = assets.get("ethereum", {})
+    usdt = assets.get("tether", {})
+    usdc = assets.get("usd-coin", {})
+
+    btc_cap = float(btc.get("market_cap") or 0)
+    eth_cap = float(eth.get("market_cap") or 0)
+    usdt_cap = float(usdt.get("market_cap") or 0)
+    usdc_cap = float(usdc.get("market_cap") or 0)
+
+    # TOTAL2/TOTAL3 are broad market-cap calculations. These are not a claim
+    # that they exactly reproduce a specific TradingView index methodology.
+    total2 = max(0.0, total - btc_cap) if btc_cap else total * max(0.0, 1.0 - btc_d / 100.0)
+    total3 = max(0.0, total - btc_cap - eth_cap) if btc_cap and eth_cap else total * max(0.0, 1.0 - (btc_d + eth_d) / 100.0)
+
+    result = {
         **m,
         "total_market_cap_usd": total,
-        "total2_market_cap_usd": total * max(0.0, 1.0 - btc_d / 100.0),
-        "total3_market_cap_usd": total * max(0.0, 1.0 - (btc_d + eth_d) / 100.0),
+        "btc_market_cap_usd": btc_cap or total * btc_d / 100.0,
+        "eth_market_cap_usd": eth_cap or total * eth_d / 100.0,
+        "total2_market_cap_usd": total2,
+        "total3_market_cap_usd": total3,
+        "broad_others_ex_btc_eth_usd": total3,
+        "usdt_market_cap_usd": usdt_cap,
+        "usdc_market_cap_usd": usdc_cap,
+        "usdt_dominance": (usdt_cap / total * 100.0) if total and usdt_cap else None,
+        "usdc_dominance": (usdc_cap / total * 100.0) if total and usdc_cap else None,
+        "btc_price_usd": btc.get("current_price"),
+        "eth_price_usd": eth.get("current_price"),
+        "btc_24h_change_pct": btc.get("price_change_percentage_24h"),
+        "eth_24h_change_pct": eth.get("price_change_percentage_24h"),
+        "others_note": "Broad ex-BTC/ex-ETH market cap (TOTAL3-style), not an exact platform-specific OTHERS index.",
     }
+
+    try:
+        result["market_breadth"] = await coingecko_market_breadth()
+    except Exception:
+        logger.exception("Market breadth lookup failed")
+        result["market_breadth"] = {}
+
+    market_cache.set(cache_key, result)
+    return result
 
 
 async def fetch_rss_news(limit: int = 10) -> list[dict]:
@@ -2415,17 +2578,21 @@ async def market_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     try:
         m = await coingecko_global_markets()
         gm = await get_global_market_context()
+        breadth = gm.get("market_breadth", {}) or {}
         text = (
             "🌍 Global Crypto Market\n"
             f"Total Market Cap: {_format_usd(gm['total_market_cap_usd'])}\n"
-            f"TOTAL2 (approx): {_format_usd(gm['total2_market_cap_usd'])}\n"
-            f"TOTAL3 (approx): {_format_usd(gm['total3_market_cap_usd'])}\n"
-            f"24h Market Cap Change: {gm['market_cap_change_24h_pct']:.2f}%\n"
+            f"TOTAL2 (broad ex-BTC): {_format_usd(gm['total2_market_cap_usd'])}\n"
+            f"TOTAL3 (broad ex-BTC-ETH): {_format_usd(gm['total3_market_cap_usd'])}\n"
+            f"24h Market Cap Change: {float(gm['market_cap_change_24h_pct'] or 0):.2f}%\n"
             f"24h Volume: {_format_usd(gm['total_volume_usd'])}\n"
-            f"BTC Dominance: {gm['btc_dominance']:.2f}%\n"
-            f"ETH Dominance: {gm['eth_dominance']:.2f}%\n"
-            f"Active Cryptocurrencies: {gm['active_cryptocurrencies']:,}\n"
-            f"Markets: {gm['markets']:,}"
+            f"BTC Dominance: {float(gm['btc_dominance'] or 0):.2f}%\n"
+            f"ETH Dominance: {float(gm['eth_dominance'] or 0):.2f}%\n"
+            f"USDT Dominance: {float(gm['usdt_dominance'] or 0):.2f}%\n"
+            f"USDC Dominance: {float(gm['usdc_dominance'] or 0):.2f}%\n"
+            f"Active Cryptocurrencies: {int(gm['active_cryptocurrencies'] or 0):,}\n"
+            f"Markets: {int(gm['markets'] or 0):,}\n"
+            f"Top-100 Breadth: {breadth.get('top100_gainers', 0)} gainers / {breadth.get('top100_losers', 0)} losers"
         )
         await update.message.reply_text(text)
     except Exception:
