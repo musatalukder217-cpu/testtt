@@ -2152,6 +2152,11 @@ async def process_text_query(update: Update, context: ContextTypes.DEFAULT_TYPE,
         except BinanceError as exc:
             logger.warning("Binance lookup failed for %s: %s", symbol, exc)
 
+    # Build the base context BEFORE appending coin/global market-specific blocks.
+    # This ordering is important: market-cap data must never be appended to an
+    # undefined context_block.
+    context_block = build_context_block(text, lang, coin_name, snapshot, ta)
+
     coin_market_caps = []
     if is_market_cap_query(text):
         market_cap_targets = extract_symbols(text)
@@ -2224,7 +2229,6 @@ async def process_text_query(update: Update, context: ContextTypes.DEFAULT_TYPE,
         except Exception:
             logger.exception("Trade-plan calculation failed")
 
-    context_block = build_context_block(text, lang, coin_name, snapshot, ta)
     # Previous chat history is useful for genuinely ambiguous follow-ups, but
     # it must not override an explicitly named current metric.
     if explicit_followup and not global_target:
@@ -2353,8 +2357,11 @@ async def process_text_query(update: Update, context: ContextTypes.DEFAULT_TYPE,
         "Do not output Banglish/Hinglish unless explicitly requested."
     )
 
-    system_prompt = SYSTEM_PROMPT_TEMPLATE.format(
-        language_name=LANGUAGE_NAMES.get(lang, "English")
+    # Do not use str.format() here because the system prompt intentionally
+    # contains literal braces such as \text{} examples. str.format() would
+    # interpret those braces as placeholders and crash every normal query.
+    system_prompt = SYSTEM_PROMPT_TEMPLATE.replace(
+        "{language_name}", LANGUAGE_NAMES.get(lang, "English")
     )
     db_save_chat_message(uid, "user", text)
     try:
