@@ -657,8 +657,8 @@ STRICT RULES:
 14. Drawing-tool selection must be contextual: Horizontal Line for a specific support/resistance level; Trend Line for repeated directional swing highs/lows; Parallel Channel for two reasonably parallel price boundaries; Rectangle for a defined consolidation/zone. Do not use every tool at once.
 15. Distinguish wick penetration from a candle-body close. A wick through a level alone is not a confirmed breakout or breakdown.
 16. For breakout/breakdown analysis, explain the trigger level, required candle-close condition, timeframe, retest condition when applicable, and invalidation condition. Describe future moves as conditional scenarios, never as guaranteed timing or certainty.
-17. When the user asks for a Long or Short setup after analysis, use the supplied live OHLCV and price-action structure to produce a conditional Entry, Stop Loss, TP1, TP2, TP3, invalidation level, and risk/reward values. Do not invent current prices.
-18. When a chart is requested, the bot may send an annotated chart image and a separate written explanation beneath it. The written explanation must match the actual drawings and detected structure.
+17. Never proactively tell the user to take a Long or Short position and never present Long/Short as the default next action. Only provide a Long or Short trade setup when the user explicitly asks for that specific setup. When explicitly requested, use the supplied live OHLCV and price-action structure to produce a conditional Entry, Stop Loss, TP1, TP2, TP3, invalidation level, and risk/reward values. Do not invent current prices.
+18. When a chart is requested, the bot may send an annotated chart image and a separate written explanation beneath it. The written explanation must match the actual drawings and detected structure. Never place the AI drawing explanation text inside the chart image.
 """
 
 LANGUAGE_NAMES = {"en": "English", "bn": "Bengali (বাংলা)", "hi": "Hindi (हिन्दी)", "bn_latn": "Banglish (Bengali written with Latin/English letters)", "hi_latn": "Hinglish (Hindi written with Latin/English letters)"}
@@ -1601,40 +1601,6 @@ def generate_market_chart(
                 )
 
 
-    # Keep all AI drawing explanations away from candles. Place the explanation
-    # in the largest practical blank area of the price panel, preferring the
-    # empty space below the candle range. If there is not enough room there,
-    # use the upper area instead.
-    if price_action and price_action.drawing_reasons:
-        candle_low = min(lows)
-        candle_high = max(highs)
-        price_range = max(candle_high - candle_low, 1e-9)
-        explanation_lines = ["AI DRAWING EXPLANATION"]
-        explanation_lines.extend(f"• {reason}" for reason in price_action.drawing_reasons[:4])
-        if price_action.breakout_status and price_action.breakout_status != "None":
-            explanation_lines.append(f"• Status: {price_action.breakout_status}")
-        explanation_text = "\n".join(explanation_lines)
-
-        # Prefer below the candle range. The y-position is data-based so it
-        # remains in a genuinely empty area across different coins/timeframes.
-        y_bottom = candle_low - 0.10 * price_range
-        y_top = candle_low - 0.02 * price_range
-        if y_bottom <= min(lows) - 0.04 * price_range:
-            y_text = candle_low - 0.07 * price_range
-        else:
-            y_text = candle_high + 0.08 * price_range
-
-        x_text = max(0.0, min(len(x) - 1, len(x) * 0.52))
-        ax.text(
-            x_text, y_text, explanation_text,
-            ha="center", va="center", fontsize=8.5, fontweight="bold",
-            color="#111827", zorder=12, clip_on=True,
-            bbox=dict(
-                boxstyle="round,pad=0.45", facecolor="white",
-                edgecolor="#2563eb", linewidth=1.6, alpha=0.94
-            )
-        )
-
     if snapshot:
         price = float(snapshot.price)
         ax.axhline(price, color="#2563eb", linestyle=":", linewidth=2.6, alpha=0.98, zorder=5)
@@ -1886,7 +1852,9 @@ async def process_text_query(update: Update, context: ContextTypes.DEFAULT_TYPE,
                     explanation_lines.append(
                         f"• Current structure/status: {price_action.breakout_status}"
                     )
-                await update.message.reply_text("\n".join(explanation_lines))
+                # Use the same safe chunking system as normal AI replies so
+                # Telegram never truncates a long explanation.
+                await reply_long(update, "\n".join(explanation_lines))
         except Exception:
             logger.exception("Chart generation failed")
 
@@ -2262,16 +2230,8 @@ async def configure_bot_commands(app: Application) -> None:
         await app.bot.set_my_commands([BotCommand("start","Start"),BotCommand("admin","Admin Panel"),BotCommand("approved","Approved Users"),BotCommand("pending","Pending Requests"),BotCommand("broadcast","Broadcast"),BotCommand("stats","Bot Stats")],scope=BotCommandScopeChat(chat_id=admin_id))
 
     startup_text = (
-        "🟢 <b>Crypto AI Telegram Assistant is ONLINE</b>\n\n"
-        "🤖 এই AI যেসব কাজ করতে পারে:\n"
-        "• লাইভ ক্রিপ্টো মার্কেট ও প্রাইস বিশ্লেষণ\n"
-        "• Multi-timeframe candle analysis\n"
-        "• Support ও Resistance শনাক্তকরণ\n"
-        "• Trend Line, Channel ও Rectangle Zone analysis\n"
-        "• Breakout, Breakdown ও Retest analysis\n"
-        "• Chart annotation ও market-structure explanation\n"
-        "• প্রয়োজন হলে Long/Short setup, Stop Loss ও Target পরিকল্পনা\n\n"
-        "বট এখন আপনার রিকোয়েস্ট গ্রহণের জন্য প্রস্তুত।\n\n"
+        "This AI provides live crypto market and price analysis, multi-timeframe candle analysis, support and resistance detection, trendline, channel and rectangle zone analysis, breakout, breakdown and retest analysis, along with chart annotation and clear market-structure explanations. The bot is now ready to receive your request."
+        "\n\n"
         f"{owner_signature_html()}"
     )
     for admin_id in ADMIN_TELEGRAM_IDS:
