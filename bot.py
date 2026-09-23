@@ -728,23 +728,47 @@ def clean_ai_text(text: str) -> str:
     text=re.sub(r"^#{1,6}\s*","",text,flags=re.MULTILINE)
     return re.sub(r"\n{3,}","\n\n",text).strip()
 
-def split_message(text: str, limit: int = 3800) -> list[str]:
-    text=clean_ai_text(text)
-    if len(text)<=limit: return [text]
-    out=[]; rem=text
-    while len(rem)>limit:
-        pos=rem.rfind("\n\n",0,limit)
-        if pos<800: pos=rem.rfind("\n",0,limit)
-        if pos<800: pos=rem.rfind(" ",0,limit)
-        if pos<1: pos=limit
-        out.append(rem[:pos].strip()); rem=rem[pos:].lstrip()
-    if rem: out.append(rem)
-    return out
+def split_message(text: str, limit: int = 3500) -> list[str]:
+    # Telegram allows 4096 characters, but keep a safety margin so no chunk is
+    # rejected because of invisible Unicode/control characters. Always return
+    # every part; never silently truncate the remainder.
+    text = clean_ai_text(text)
+    if not text:
+        return [""]
+    out = []
+    rem = text
+    while len(rem) > limit:
+        pos = rem.rfind("\n\n", 0, limit)
+        if pos < 500:
+            pos = rem.rfind("\n", 0, limit)
+        if pos < 500:
+            pos = rem.rfind(" ", 0, limit)
+        if pos < 1:
+            pos = limit
+        out.append(rem[:pos].rstrip())
+        rem = rem[pos:].lstrip()
+    if rem:
+        out.append(rem)
+    return [part for part in out if part]
 
 async def reply_long(update: Update, text: str) -> None:
+    # Send every chunk sequentially. If Telegram temporarily rejects one part,
+    # retry that same part before moving on, so the tail of a long answer is
+    # never silently lost.
     for chunk in split_message(text):
-        await update.message.reply_text(chunk,parse_mode=None)
-        await asyncio.sleep(0.05)
+        last_error = None
+        for attempt in range(3):
+            try:
+                await update.message.reply_text(chunk, parse_mode=None)
+                last_error = None
+                break
+            except Exception as exc:
+                last_error = exc
+                logger.warning("Long-message chunk send failed (attempt %s/3): %s", attempt + 1, exc)
+                await asyncio.sleep(0.7 * (attempt + 1))
+        if last_error is not None:
+            logger.exception("Could not send a message chunk after retries")
+        await asyncio.sleep(0.15)
 
 
 # ==================================================
@@ -963,33 +987,90 @@ async def price_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 
 # Timeframe resolution for Binance candles.
-# Native Binance intervals are used where available; a yearly candle is built
-# from 12 monthly candles because Binance has no native 1y kline interval.
+# Supports Binance-native intervals plus common natural-language variants
+# (English, Bengali, Banglish, numeric 4H/8H forms).
 TIMEFRAME_PATTERNS = [
-    (("1 মিনিট", "১ মিনিট", "1 minute", "1m candle", "১m"), "1m", 300, "1 Minute"),
-    (("3 মিনিট", "৩ মিনিট", "3 minute"), "3m", 300, "3 Minute"),
-    (("5 মিনিট", "৫ মিনিট", "5 minute"), "5m", 300, "5 Minute"),
-    (("15 মিনিট", "১৫ মিনিট", "15 minute"), "15m", 300, "15 Minute"),
-    (("30 মিনিট", "৩০ মিনিট", "30 minute"), "30m", 300, "30 Minute"),
-    (("2 ঘন্টা", "২ ঘন্টা", "2 hour", "2h"), "2h", 300, "2 Hour"),
-    (("4 ঘন্টা", "৪ ঘন্টা", "4 hour", "4h"), "4h", 300, "4 Hour"),
-    (("6 ঘন্টা", "৬ ঘন্টা", "6 hour", "6h"), "6h", 300, "6 Hour"),
-    (("8 ঘন্টা", "৮ ঘন্টা", "8 hour", "8h"), "8h", 300, "8 Hour"),
-    (("12 ঘন্টা", "১২ ঘন্টা", "12 hour", "12h"), "12h", 300, "12 Hour"),
-    (("দৈনিক", "দিনের ক্যান্ডেল", "daily", "1 day", "1d"), "1d", 365, "Daily"),
-    (("3 দিন", "৩ দিন", "3 day", "3d"), "3d", 300, "3 Day"),
-    (("সাপ্তাহিক", "সপ্তাহের ক্যান্ডেল", "weekly", "1 week", "1w"), "1w", 260, "Weekly"),
-    (("মাসিক", "মাসের ক্যান্ডেল", "monthly", "1 month", "1mo"), "1M", 240, "Monthly"),
-    (("বার্ষিক", "বছরের ক্যান্ডেল", "yearly", "annual", "1 year", "1y"), "1y", 120, "Yearly"),
-    (("ঘন্টার", "১ ঘন্টা", "1 hour", "hourly", "1h"), "1h", 300, "1 Hour"),
+    (("1 second", "1-second", "1s", "১ সেকেন্ড", "এক সেকেন্ড"), "1s", 300, "1 Second"),
+    (("1 মিনিট", "১ মিনিট", "1 minute", "1-minute", "1m", "১m"), "1m", 300, "1 Minute"),
+    (("3 মিনিট", "৩ মিনিট", "3 minute", "3-minute", "3m", "৩m"), "3m", 300, "3 Minute"),
+    (("5 মিনিট", "৫ মিনিট", "5 minute", "5-minute", "5m", "৫m"), "5m", 300, "5 Minute"),
+    (("10 মিনিট", "১০ মিনিট", "10 minute", "10-minute", "10m", "১০m"), "10m", 300, "10 Minute"),
+    (("15 মিনিট", "১৫ মিনিট", "15 minute", "15-minute", "15m", "১৫m"), "15m", 300, "15 Minute"),
+    (("20 মিনিট", "২০ মিনিট", "20 minute", "20-minute", "20m", "২০m"), "20m", 300, "20 Minute"),
+    (("30 মিনিট", "৩০ মিনিট", "30 minute", "30-minute", "30m", "৩০m"), "30m", 300, "30 Minute"),
+    (("45 মিনিট", "৪৫ মিনিট", "45 minute", "45-minute", "45m", "৪৫m"), "45m", 300, "45 Minute"),
+    (("2 ঘন্টা", "২ ঘন্টা", "2 ঘণ্টা", "২ ঘণ্টা", "2 hour", "2-hour", "2 hours", "2h", "২h"), "2h", 300, "2 Hour"),
+    (("3 ঘন্টা", "৩ ঘন্টা", "3 ঘণ্টা", "৩ ঘণ্টা", "3 hour", "3-hour", "3 hours", "3h", "৩h"), "3h", 300, "3 Hour"),
+    (("4 ঘন্টা", "৪ ঘন্টা", "4 ঘণ্টা", "৪ ঘণ্টা", "4 hour", "4-hour", "4 hours", "4h", "৪h"), "4h", 300, "4 Hour"),
+    (("6 ঘন্টা", "৬ ঘন্টা", "6 ঘণ্টা", "৬ ঘণ্টা", "6 hour", "6-hour", "6 hours", "6h", "৬h"), "6h", 300, "6 Hour"),
+    (("8 ঘন্টা", "৮ ঘন্টা", "8 ঘণ্টা", "৮ ঘণ্টা", "8 hour", "8-hour", "8 hours", "8h", "৮h"), "8h", 300, "8 Hour"),
+    (("12 ঘন্টা", "১২ ঘন্টা", "12 ঘণ্টা", "১২ ঘণ্টা", "12 hour", "12-hour", "12 hours", "12h", "১২h"), "12h", 300, "12 Hour"),
+    (("ঘন্টার", "ঘণ্টার", "ঘন্টা", "ঘণ্টা", "১ ঘন্টা", "১ ঘণ্টা", "1 hour", "1-hour", "hourly", "1h"), "1h", 300, "1 Hour"),
+    (("দৈনিক", "দিনের ক্যান্ডেল", "daily", "1 day", "1-day", "1d", "১d"), "1d", 365, "Daily"),
+    (("3 দিন", "৩ দিন", "3 day", "3-day", "3d", "৩d"), "3d", 300, "3 Day"),
+    (("সাপ্তাহিক", "সপ্তাহের ক্যান্ডেল", "weekly", "1 week", "1-week", "1w", "১w"), "1w", 260, "Weekly"),
+    (("মাসিক", "মাসের ক্যান্ডেল", "monthly", "1 month", "1-month", "1mo", "1M"), "1M", 240, "Monthly"),
+    (("বার্ষিক", "বছরের ক্যান্ডেল", "yearly", "annual", "1 year", "1-year", "1y"), "1y", 120, "Yearly"),
 ]
 
+# Binance does not provide native 10m/20m/45m spot klines. They are
+# constructed from smaller native candles when requested.
+_AGGREGATED_TIMEFRAMES = {"10m": ("5m", 2), "20m": ("5m", 4), "45m": ("15m", 3)}
+
 def resolve_timeframe(text: str) -> tuple[str, int, str]:
-    t = normalize_user_text(text)
+    raw = text or ""
+    t = normalize_user_text(raw)
+    # Preserve the conventional TradingView distinction: uppercase 1M means
+    # Monthly, while lowercase 1m means 1 Minute.
+    if re.search(r"(?<![A-Za-z0-9])1M(?![A-Za-z0-9])", raw):
+        return "1M", 240, "Monthly"
+    # Explicit numeric forms such as "4H candle", "4H timeframe", "৪H",
+    # "4 ঘণ্টার candle" should win over generic "hour" matching.
+    digit_map = str.maketrans("০১২৩৪৫৬৭৮৯", "0123456789")
+    ascii_t = t.translate(digit_map)
+    compact = re.sub(r"\s+", " ", ascii_t)
+    m = re.search(r"(?<!\d)(1|2|3|4|5|6|8|12)\s*(?:h|hr|hrs|hour|hours|ঘন্টা|ঘণ্টা)\b", compact, re.I)
+    if m:
+        n = m.group(1)
+        interval = f"{n}h"
+        return interval, 300, f"{n} Hour"
+    m = re.search(r"(?<!\d)(1|3|5|10|15|20|30|45)\s*(?:m|min|mins|minute|minutes|মিনিট)\b", compact, re.I)
+    if m:
+        n = m.group(1)
+        interval = f"{n}m"
+        return interval, 300, f"{n} Minute"
+    m = re.search(r"(?<!\d)(1|3)\s*(?:d|day|days|দিন)\b", compact, re.I)
+    if m:
+        n = m.group(1)
+        return f"{n}d", 365 if n == "1" else 300, "Daily" if n == "1" else "3 Day"
+    if re.search(r"\b(?:1\s*w|weekly|week|সাপ্তাহিক|সপ্তাহ)\b", compact, re.I):
+        return "1w", 260, "Weekly"
+    if re.search(r"\b(?:1\s*m(?:o)?|monthly|month|মাসিক|মাস)\b", compact, re.I):
+        return "1M", 240, "Monthly"
+    if re.search(r"\b(?:1\s*y|yearly|annual|year|বার্ষিক|বছর)\b", compact, re.I):
+        return "1y", 120, "Yearly"
     for terms, interval, limit, label in TIMEFRAME_PATTERNS:
         if any(term in t for term in terms):
             return interval, limit, label
     return "1h", 300, "1 Hour"
+
+def aggregate_klines(base_klines: list, group_size: int) -> list:
+    """Aggregate contiguous OHLCV candles into a larger timeframe."""
+    if not base_klines or group_size <= 1:
+        return base_klines
+    out = []
+    usable = len(base_klines) - (len(base_klines) % group_size)
+    for i in range(0, usable, group_size):
+        rows = base_klines[i:i + group_size]
+        out.append([
+            rows[0][0], rows[0][1],
+            str(max(float(r[2]) for r in rows)),
+            str(min(float(r[3]) for r in rows)),
+            rows[-1][4],
+            str(sum(float(r[5]) for r in rows)),
+            rows[-1][6],
+        ])
+    return out
 
 def aggregate_yearly_klines(monthly_klines: list) -> list:
     """Aggregate Binance 1M klines into calendar-year OHLCV candles."""
@@ -1017,6 +1098,11 @@ async def get_timeframe_klines(symbol: str, interval: str, limit: int) -> list:
     if interval == "1y":
         monthly = await binance_klines(symbol, "1M", min(1000, max(120, limit * 12)))
         return aggregate_yearly_klines(monthly)
+    if interval in _AGGREGATED_TIMEFRAMES:
+        base_interval, group_size = _AGGREGATED_TIMEFRAMES[interval]
+        base_limit = min(1000, max(300, limit * group_size + group_size))
+        base = await binance_klines(symbol, base_interval, base_limit)
+        return aggregate_klines(base, group_size)[-limit:]
     return await binance_klines(symbol, interval, min(1000, limit))
 
 
@@ -1685,12 +1771,25 @@ async def process_text_query(update: Update, context: ContextTypes.DEFAULT_TYPE,
     if not resolved and uid in LAST_MARKET_CONTEXT:
         # Natural follow-up: "এইটা চার্ট দাও", "support resistance দেখাও" etc.
         resolved = LAST_MARKET_CONTEXT[uid].get("resolved")
-    if not resolved:
-        # Restore the last requested market from SQLite after restart, so follow-ups
-        # such as "এটার চার্ট দাও" do not lose the previous coin context.
+
+    # Resolve an explicitly requested timeframe first. If the user did not
+    # mention a timeframe, restore the last timeframe from memory/database.
+    requested_interval, requested_limit, requested_label = resolve_timeframe(text)
+    explicit_timeframe = bool(re.search(
+        r"(?:\b(?:1|2|3|4|5|6|8|12)\s*(?:h|hr|hrs|hour|hours)\b|"
+        r"\b(?:1|3|5|10|15|20|30|45)\s*(?:m|min|mins|minute|minutes)\b|"
+        r"\b(?:1|3)\s*(?:d|day|days)\b|\b(?:1w|1mo|1y)\b|"
+        r"(?:ঘন্টা|ঘণ্টা|মিনিট|দিন|সাপ্তাহিক|মাসিক|বার্ষিক))",
+        normalize_user_text(text),
+        re.I,
+    ))
+    candle_interval, candle_limit, timeframe_label = requested_interval, requested_limit, requested_label
+
+    if not explicit_timeframe:
         saved_market = db_get_market_context(uid)
         if saved_market and saved_market["symbol"]:
-            resolved = (saved_market["symbol"], saved_market["coin_name"] or saved_market["symbol"])
+            if not resolved:
+                resolved = (saved_market["symbol"], saved_market["coin_name"] or saved_market["symbol"])
             candle_interval = saved_market["interval"] or candle_interval
             candle_limit = int(saved_market["limit_count"] or candle_limit)
             timeframe_label = saved_market["timeframe_label"] or timeframe_label
@@ -1699,7 +1798,6 @@ async def process_text_query(update: Update, context: ContextTypes.DEFAULT_TYPE,
     ta = None
     coin_name = None
     klines = None
-    candle_interval, candle_limit, timeframe_label = resolve_timeframe(text)
 
     if resolved:
         symbol, coin_name = resolved
@@ -1843,18 +1941,9 @@ async def process_text_query(update: Update, context: ContextTypes.DEFAULT_TYPE,
             await update.message.reply_photo(
                 photo=InputFile(chart_buf, filename="market_chart.png"),
             )
-            if price_action and price_action.drawing_reasons:
-                explanation_lines = ["📌 AI Chart Drawing Explanation"]
-                explanation_lines.extend(
-                    f"• {reason}" for reason in price_action.drawing_reasons[:6]
-                )
-                if price_action.breakout_status:
-                    explanation_lines.append(
-                        f"• Current structure/status: {price_action.breakout_status}"
-                    )
-                # Use the same safe chunking system as normal AI replies so
-                # Telegram never truncates a long explanation.
-                await reply_long(update, "\n".join(explanation_lines))
+            # Drawing explanations are kept out of the chart and are not sent
+            # as a separate "AI Chart Drawing Explanation" message. The main AI
+            # response below remains the single textual analysis channel.
         except Exception:
             logger.exception("Chart generation failed")
 
