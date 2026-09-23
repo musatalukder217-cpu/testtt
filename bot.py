@@ -1728,8 +1728,8 @@ def generate_market_chart(
             ax.axhline(level, color=color, linestyle=style, linewidth=2.8, alpha=0.98, zorder=5)
             ax.annotate(
                 f"{label}  ${level:,.2f}",
-                xy=(len(x)-1, level), xytext=(-8, 0), textcoords="offset points",
-                ha="right", va="center", fontsize=9, fontweight="bold", color=color,
+                xy=(len(x)+4, level),
+                ha="left", va="center", fontsize=9, fontweight="bold", color=color,
                 bbox=dict(boxstyle="round,pad=0.25", facecolor="white", edgecolor=color, alpha=0.90),
                 zorder=6,
             )
@@ -1814,8 +1814,8 @@ def generate_market_chart(
                 ax.axhline(level, color=color, linestyle="--", linewidth=1.8, alpha=0.85, zorder=6)
                 ax.annotate(
                     f"{label} ${level:,.4f}",
-                    xy=(len(x)-1, level), xytext=(-8, 0), textcoords="offset points",
-                    ha="right", va="center", fontsize=8.5, fontweight="bold", color=color,
+                    xy=(len(x)+4, level),
+                    ha="left", va="center", fontsize=8.5, fontweight="bold", color=color,
                     bbox=dict(boxstyle="round,pad=0.22", facecolor="white",
                               edgecolor=color, alpha=0.88), zorder=9
                 )
@@ -1826,8 +1826,8 @@ def generate_market_chart(
         ax.axhline(price, color="#2563eb", linestyle=":", linewidth=2.6, alpha=0.98, zorder=5)
         ax.annotate(
             f"Current Price  ${price:,.2f}",
-            xy=(len(x)-1, price), xytext=(-8, 15), textcoords="offset points",
-            ha="right", va="bottom", fontsize=9, fontweight="bold", color="#2563eb",
+            xy=(len(x)+4, price),
+            ha="left", va="center", fontsize=9, fontweight="bold", color="#2563eb",
             bbox=dict(boxstyle="round,pad=0.25", facecolor="white", edgecolor="#2563eb", alpha=0.90),
             zorder=6,
         )
@@ -1841,6 +1841,8 @@ def generate_market_chart(
         fontsize=15, fontweight="bold"
     )
     ax.set_ylabel("Price (USDT)")
+    # Keep all price labels in a clean right-side margin so they do not cover candles.
+    ax.set_xlim(-1, len(x) + 10)
     ax.grid(alpha=0.18)
     av.set_ylabel("Volume")
     av.grid(alpha=0.10)
