@@ -858,26 +858,57 @@ def build_context_block(
 
 
 async def ask_groq(system_prompt: str, context_block: str) -> str:
+    """Call GPT-OSS 120B with resilient capability fallbacks.
+
+    Groq currently supports browser_search and code_interpreter for GPT-OSS
+    120B. If a deployment/API version rejects a tool combination, retry with
+    a narrower configuration and finally with a plain completion so a tool
+    compatibility issue does not break the whole Telegram bot.
+    """
     def _call():
-        completion = groq_client.chat.completions.create(
-            model=GROQ_MODEL,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": context_block},
-            ],
-            # GPT-OSS 120B supports reasoning plus Groq built-in browser search
-            # and code execution. These expose capabilities of the connected
-            # API rather than trying to imitate them in the prompt.
-            tools=[
-                {"type": "browser_search"},
-                {"type": "code_interpreter"},
-            ],
-            reasoning_effort="high",
-            include_reasoning=False,
-            temperature=0.4,
-            max_tokens=6000,
-        )
-        return completion.choices[0].message.content
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": context_block},
+        ]
+        attempts = [
+            {
+                "tools": [
+                    {"type": "browser_search"},
+                    {"type": "code_interpreter"},
+                ],
+                "reasoning_effort": "high",
+            },
+            {
+                "tools": [{"type": "browser_search"}],
+                "reasoning_effort": "high",
+            },
+            {
+                "tools": [{"type": "code_interpreter"}],
+                "reasoning_effort": "high",
+            },
+            {
+                "reasoning_effort": "medium",
+            },
+        ]
+        last_error = None
+        for idx, extra in enumerate(attempts, 1):
+            try:
+                kwargs = {
+                    "model": GROQ_MODEL,
+                    "messages": messages,
+                    "temperature": 0.4,
+                    "max_completion_tokens": 6000,
+                    **extra,
+                }
+                completion = groq_client.chat.completions.create(**kwargs)
+                content = completion.choices[0].message.content
+                if content:
+                    return content
+                raise RuntimeError("Groq returned an empty response")
+            except Exception as exc:
+                last_error = exc
+                logger.exception("Groq attempt %s/%s failed", idx, len(attempts))
+        raise last_error or RuntimeError("Groq request failed")
 
     return await asyncio.to_thread(_call)
 
@@ -2352,8 +2383,8 @@ async def process_text_query(update: Update, context: ContextTypes.DEFAULT_TYPE,
     db_save_chat_message(uid, "user", text)
     try:
         reply = await ask_groq(system_prompt, context_block)
-    except Exception:
-        logger.exception("Groq API call failed")
+    except Exception as exc:
+        logger.exception("Groq API call failed after all fallbacks: %s", exc)
         await update.message.reply_text(
             "AI service is temporarily unavailable. Please try again shortly."
         )
