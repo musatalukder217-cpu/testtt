@@ -560,6 +560,30 @@ def is_crypto_query(text: str) -> bool:
     return True
 
 
+COIN_MARKET_CAP_PATTERNS = (
+    "market cap", "market capitalization", "marketcap", "mcap",
+    "মার্কেট ক্যাপ", "মার্কেট ক্যাপিটালাইজেশন", "মার্কেটক্যাপ",
+    "मार्केट कैप", "मार्केट कैपिटलाइजेशन",
+)
+
+def is_market_cap_query(text: str) -> bool:
+    t = normalize_user_text(text)
+    return any(term in t for term in COIN_MARKET_CAP_PATTERNS)
+
+
+def is_ambiguous_followup(text: str) -> bool:
+    t = normalize_user_text(text)
+    followup_terms = (
+        "this coin", "that coin", "this one", "that one", "same coin", "same one",
+        "previous", "earlier", "আগের", "পূর্বের", "এই কয়েন", "এই কয়েন",
+        "ওই কয়েন", "ওই কয়েন", "এইটা", "ওইটা", "এটা", "ওটা", "আগেরটা",
+        "পূর্বেরটা", "একই কয়েন", "একই কয়েন", "same",
+    )
+    if is_market_cap_query(t) and not extract_symbol(t) and not detect_global_market_target(t):
+        return True
+    return any(term in t for term in followup_terms)
+
+
 GLOBAL_METRIC_PATTERNS = {
     "total_market_cap": (
         "total market cap", "total market capitalization", "global market cap",
@@ -625,6 +649,20 @@ def extract_symbol(text: str) -> Optional[tuple[str, str]]:
         candidate = match.group(1).upper()
         return f"{candidate}USDT", candidate
     return None
+
+
+def extract_symbols(text: str) -> list[tuple[str, str]]:
+    """Extract all explicitly named known crypto assets from the current query."""
+    t = normalize_user_text(text)
+    found: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for alias in sorted(COIN_ALIASES, key=len, reverse=True):
+        if re.search(rf"(?<![a-zA-Z0-9]){re.escape(alias)}(?![a-zA-Z0-9])", t):
+            pair = COIN_ALIASES[alias]
+            if pair[0] not in seen:
+                found.append(pair)
+                seen.add(pair[0])
+    return found
 
 
 def detect_language(text: str) -> str:
@@ -729,6 +767,18 @@ REAL-TIME NEWS, SOURCING & FACT-CHECKING:
 4. Give exact figures and timestamps when supplied by live sources. Do not replace exact data with vague phrases such as "a lot" or "huge" when an exact figure is available.
 5. Never fabricate a source, URL, figure, quote, on-chain metric, liquidation amount, token amount, regulatory action or news event.
 6. If a requested live metric is unavailable, explicitly say that the exact live field is unavailable instead of substituting an unrelated or previous value.
+
+STRICT CURRENT-QUERY AND MARKET-CAP RULES:
+- The current USER_QUERY always has absolute priority. Never assume the next message is related to the previous message unless it explicitly refers back to prior context or is genuinely ambiguous.
+- If the current message names a coin or metric, answer that exact target; never use the previous coin's data.
+- If the user asks for MARKET CAP, return market capitalization, not coin price. Do not add price unless explicitly requested.
+- Arbitrary coin market-cap requests must use supplied live CoinGecko market-cap data when available; do not restrict market-cap answers to the hard-coded coin list.
+- TOTAL, TOTAL2, TOTAL3, OTHERS, BTC.D, ETH.D, USDT.D and USDC.D are distinct global market metrics and must use their supplied live context.
+- Never fabricate a market cap, price, dominance, supply, rank, volume, or index value.
+
+CLEAN TELEGRAM OUTPUT RULES:
+- Return clean human-readable plain text. Do not output Markdown table pipes (|), separator rows (---), raw LaTeX delimiters or commands such as \text{} and \times.
+- Prefer simple headings, short paragraphs, bullets and line breaks.
 
 OPERATIONAL GUIDELINES:
 1. Begin immediately with the answer or core finding. Avoid filler greetings, throat-clearing or meta-announcements.
@@ -866,9 +916,24 @@ async def ask_groq(system_prompt: str, context_block: str) -> str:
 # MESSAGE SPLITTING (Telegram 4096-char limit)
 # ==================================================
 def clean_ai_text(text: str) -> str:
-    text=text.replace("**","").replace("__","").replace("`","").replace("*","")
-    text=re.sub(r"^#{1,6}\s*","",text,flags=re.MULTILINE)
-    return re.sub(r"\n{3,}","\n\n",text).strip()
+    # Telegram replies are sent as plain text. Remove markdown/LaTeX/table
+    # artifacts so the user sees clean, readable analysis.
+    text = text or ""
+    text = text.replace("**", "").replace("__", "").replace("`", "").replace("*", "")
+    text = text.replace("\\[", "").replace("\\]", "")
+    text = text.replace("\\(", "").replace("\\)", "")
+    text = re.sub(r"^#{1,6}\s*", "", text, flags=re.MULTILINE)
+    text = re.sub(r"^\s*[-_=]{3,}\s*$", "", text, flags=re.MULTILINE)
+    text = re.sub(r"^\s*\|\s*-{2,}(?:\s*\|\s*-{2,})+\s*\|?\s*$", "", text, flags=re.MULTILINE)
+    text = re.sub(r"^\s*\|", "", text, flags=re.MULTILINE)
+    text = re.sub(r"\|\s*$", "", text, flags=re.MULTILINE)
+    text = re.sub(r"\s*\|\s*", " — ", text)
+    text = re.sub(r"\\text(?:bf|it|rm|normal)?\s*\{([^{}]*)\}", r"\1", text)
+    text = re.sub(r"\\(?:times|cdot|div|approx|leq|geq)", " ", text)
+    text = text.replace("{", "").replace("}", "")
+    text = re.sub(r"[ \t]+", " ", text)
+    return re.sub(r"\n{3,}", "\n\n", text).strip()
+
 
 def split_message(text: str, limit: int = 3500) -> list[str]:
     # Telegram allows 4096 characters, but keep a safety margin so no chunk is
@@ -2039,9 +2104,9 @@ async def process_text_query(update: Update, context: ContextTypes.DEFAULT_TYPE,
 
     global_target = detect_global_market_target(text)
     resolved = None if global_target else extract_symbol(text)
-    if not resolved and not global_target and uid in LAST_MARKET_CONTEXT:
-        # Natural follow-up is allowed only when the current message does not
-        # explicitly name a global market metric. The current query always wins.
+    explicit_followup = is_ambiguous_followup(text)
+    if not resolved and not global_target and explicit_followup and uid in LAST_MARKET_CONTEXT:
+        # Prior coin context is restored only for an explicitly ambiguous follow-up.
         resolved = LAST_MARKET_CONTEXT[uid].get("resolved")
 
     # Resolve an explicitly requested timeframe first. If the user did not
@@ -2087,6 +2152,41 @@ async def process_text_query(update: Update, context: ContextTypes.DEFAULT_TYPE,
         except BinanceError as exc:
             logger.warning("Binance lookup failed for %s: %s", symbol, exc)
 
+    coin_market_caps = []
+    if is_market_cap_query(text):
+        market_cap_targets = extract_symbols(text)
+        if not market_cap_targets and resolved:
+            market_cap_targets = [resolved]
+        for target_symbol, target_name in market_cap_targets[:5]:
+            try:
+                cap_data = await coingecko_coin_market_data(target_name, target_symbol)
+                if cap_data:
+                    coin_market_caps.append(cap_data)
+            except Exception:
+                logger.exception("Coin market-cap context lookup failed for %s", target_name)
+        if coin_market_caps:
+            cap_lines = []
+            for cap in coin_market_caps:
+                cap_lines.append(
+                    f"{cap.get('name')} ({str(cap.get('symbol') or '').upper()}): "
+                    f"market_cap_usd={cap.get('market_cap_usd')}; "
+                    f"market_cap_rank={cap.get('market_cap_rank')}; "
+                    f"current_price_usd={cap.get('current_price_usd')}; "
+                    f"circulating_supply={cap.get('circulating_supply')}; "
+                    f"total_supply={cap.get('total_supply')}; "
+                    f"max_supply={cap.get('max_supply')}; "
+                    f"fdv_usd={cap.get('fully_diluted_valuation_usd')}; "
+                    f"price_change_24h_pct={cap.get('price_change_24h_pct')}; "
+                    f"volume_24h_usd={cap.get('total_volume_24h_usd')}"
+                )
+            context_block += "\nCOIN_MARKET_CAP_CONTEXT:\n" + "\n".join(cap_lines)
+            context_block += (
+                "\nTARGET_PRIORITY: The user explicitly asked for MARKET CAP. "
+                "Answer each explicitly named coin's market capitalization. "
+                "Do NOT substitute coin price for market cap. Do not add price unless explicitly requested. "
+                "If multiple coins are named, provide each coin's market cap separately.\n"
+            )
+
     normalized = normalize_user_text(text)
     chart_words = (
         "chart", "graph", "image", "photo", "চার্ট", "গ্রাফ", "ছবি", "ফটো",
@@ -2127,7 +2227,7 @@ async def process_text_query(update: Update, context: ContextTypes.DEFAULT_TYPE,
     context_block = build_context_block(text, lang, coin_name, snapshot, ta)
     # Previous chat history is useful for genuinely ambiguous follow-ups, but
     # it must not override an explicitly named current metric.
-    if not global_target:
+    if explicit_followup and not global_target:
         previous_history = db_get_chat_history(uid, limit=8)
         if previous_history:
             history_lines = ["PREVIOUS_CONVERSATION_CONTEXT:"]
@@ -2163,7 +2263,7 @@ async def process_text_query(update: Update, context: ContextTypes.DEFAULT_TYPE,
     # Supply comprehensive global market context for explicit market-metric
     # questions. This block is target-aware so "TOTAL2 price" cannot inherit
     # the previous BTC/ETH context by mistake.
-    if global_target or any(term in normalized for term in (
+    if global_target or is_market_cap_query(text) or any(term in normalized for term in (
         "total", "total2", "total 2", "total3", "total 3", "btc.d", "eth.d",
         "usdt.d", "usdc.d", "dominance", "ডমিনেন্স", "মার্কেট ক্যাপ",
         "global market", "গ্লোবাল মার্কেট", "ক্রিপ্টো মার্কেট", "crypto market",
@@ -2451,6 +2551,47 @@ async def coingecko_key_market_assets() -> dict:
     }
     rows = await _generic_get(f"{COINGECKO_BASE_URL}/coins/markets", params=params, headers=headers)
     return {str(r.get("id")): r for r in (rows or [])}
+
+
+async def coingecko_coin_market_data(query: str, symbol: str | None = None) -> dict | None:
+    """Resolve an arbitrary coin through CoinGecko and return live market-cap data."""
+    q = (query or "").strip()
+    if not q:
+        return None
+    headers = {}
+    if COINGECKO_API_KEY:
+        headers["x-cg-demo-api-key"] = COINGECKO_API_KEY
+    try:
+        search_data = await _generic_get(
+            f"{COINGECKO_BASE_URL}/search", params={"query": q}, headers=headers
+        )
+        coins = search_data.get("coins", []) if isinstance(search_data, dict) else []
+        target_symbol = (symbol or "").lower().replace("usdt", "")
+        target = next((c for c in coins if str(c.get("symbol", "")).lower() == target_symbol), None)
+        if target is None and coins:
+            target = coins[0]
+        if not target or not target.get("id"):
+            return None
+        rows = await _generic_get(
+            f"{COINGECKO_BASE_URL}/coins/markets",
+            params={"vs_currency":"usd", "ids":target["id"], "order":"market_cap_desc", "per_page":1, "page":1, "sparkline":"false"},
+            headers=headers,
+        )
+        if not rows:
+            return None
+        r=rows[0]
+        return {
+            "id":r.get("id"), "name":r.get("name"), "symbol":r.get("symbol"),
+            "market_cap_usd":r.get("market_cap"), "current_price_usd":r.get("current_price"),
+            "market_cap_rank":r.get("market_cap_rank"), "circulating_supply":r.get("circulating_supply"),
+            "total_supply":r.get("total_supply"), "max_supply":r.get("max_supply"),
+            "fully_diluted_valuation_usd":r.get("fully_diluted_valuation"),
+            "price_change_24h_pct":r.get("price_change_percentage_24h"),
+            "total_volume_24h_usd":r.get("total_volume"),
+        }
+    except Exception:
+        logger.exception("Coin-specific market-cap lookup failed for %s", q)
+        return None
 
 
 async def coingecko_market_breadth() -> dict:
