@@ -25,6 +25,7 @@ import logging
 import sqlite3
 import asyncio
 import io
+import base64
 import unicodedata
 from html import escape as html_escape
 from collections import deque
@@ -94,6 +95,12 @@ OWNER_DISPLAY_NAME = "—͞Tᴍ Mᴜsᴀ⚡️"
 OWNER_TELEGRAM_USERNAME = "tmmusa73"
 OWNER_TELEGRAM_URL = "https://t.me/tmmusa73"
 
+# Optional image-edit backend. Existing bot features do not depend on it.
+# Set OPENAI_API_KEY to enable direct image editing of the last generated/uploaded image.
+OPENAI_API_KEY = _env("OPENAI_API_KEY", "")
+OPENAI_IMAGE_MODEL = _env("OPENAI_IMAGE_MODEL", "gpt-image-2")
+OPENAI_IMAGES_EDIT_URL = "https://api.openai.com/v1/images/edits"
+
 # ==================================================
 # LOGGING
 # ==================================================
@@ -108,6 +115,8 @@ logger = logging.getLogger("crypto_ai_bot")
 
 # Per-user short-lived conversation context for follow-up market/chart requests.
 LAST_MARKET_CONTEXT: dict[int, dict] = {}
+# Last image per user for follow-up natural-language editing requests.
+LAST_IMAGE_CONTEXT: dict[int, bytes] = {}
 
 
 # ==================================================
@@ -1519,6 +1528,131 @@ def build_trade_plan(analysis: PriceActionAnalysis, klines: list, side: str) -> 
     }
 
 
+
+# ==================================================
+# IMAGE EDITING (ADDITIVE FEATURE ONLY)
+# ==================================================
+def is_image_edit_request(text: str) -> bool:
+    normalized = normalize_user_text(text)
+    edit_terms = (
+        "edit", "modify", "change", "move", "remove", "delete", "add", "draw",
+        "replace", "shift", "resize", "adjust", "fix", "এডিট", "পরিবর্তন",
+        "বদলাও", "সরাও", "মুছে", "মুছে দাও", "যোগ কর", "লাইন টান", "লাইন দাও",
+        "ক্যান্ডেল এখানে", "ক্যান্ডেল ওখানে", "উপরে নিয়ে", "নিচে নিয়ে", "মাঝখানে",
+        "ক্যান্ডেল বাদ", "ছবি এডিট", "ছবিটা এডিট", "চার্ট এডিট"
+    )
+    return any(term in normalized for term in edit_terms)
+
+
+async def edit_image_with_openai(image_bytes: bytes, user_instruction: str) -> bytes:
+    if not OPENAI_API_KEY:
+        raise RuntimeError(
+            "Image editing is not configured. Set OPENAI_API_KEY in the bot environment."
+        )
+
+    prompt = (
+        "Edit the supplied chart/image according to the user's instruction. "
+        "Make ONLY the requested changes. Preserve the rest of the image exactly "
+        "as much as possible, including candles, chart layout, labels, lines, "
+        "colors, axes, and text unless the user explicitly asks to change them. "
+        "If the user asks to move, add, remove, redraw, or reposition a chart "
+        "element, follow that instruction precisely. Do not redesign the image.\n\n"
+        f"USER EDIT INSTRUCTION: {user_instruction}"
+    )
+
+    async with httpx.AsyncClient(timeout=180.0) as client:
+        response = await client.post(
+            OPENAI_IMAGES_EDIT_URL,
+            headers={"Authorization": f"Bearer {OPENAI_API_KEY}"},
+            files={"image": ("chart.png", image_bytes, "image/png")},
+            data={
+                "model": OPENAI_IMAGE_MODEL,
+                "prompt": prompt,
+                "size": "1536x1024",
+            },
+        )
+        response.raise_for_status()
+        payload = response.json()
+
+    items = payload.get("data") or []
+    if not items:
+        raise RuntimeError("Image edit API returned no image.")
+
+    item = items[0]
+    if item.get("b64_json"):
+        return base64.b64decode(item["b64_json"])
+
+    image_url = item.get("url")
+    if image_url:
+        async with httpx.AsyncClient(timeout=180.0) as client:
+            img_response = await client.get(image_url)
+            img_response.raise_for_status()
+            return img_response.content
+
+    raise RuntimeError("Image edit API returned an unsupported image response.")
+
+
+async def handle_image_edit_request(update: Update, text: str) -> bool:
+    if not update.message:
+        return False
+    uid = update.effective_user.id
+    if not await require_approved(update):
+        return True
+    if not is_image_edit_request(text):
+        return False
+
+    source = LAST_IMAGE_CONTEXT.get(uid)
+    if not source:
+        await reply_long(
+            update,
+            "আপনি যে ছবিটি এডিট করতে চান, সেটি আগে এই বটে পাঠান বা বটের তৈরি করা সর্বশেষ chart/image-এর পরেই edit instruction দিন।"
+        )
+        return True
+
+    if not OPENAI_API_KEY:
+        await reply_long(
+            update,
+            "Image editing feature-এর জন্য OPENAI_API_KEY সেট করা নেই। Bot-এর environment variables-এ OPENAI_API_KEY যোগ করলে এই edit system চালু হবে।"
+        )
+        return True
+
+    await context_action_typing(update)
+    try:
+        edited = await edit_image_with_openai(source, text.strip())
+        LAST_IMAGE_CONTEXT[uid] = edited
+        await update.message.reply_photo(photo=InputFile(io.BytesIO(edited), filename="edited_chart.png"))
+    except Exception as exc:
+        logger.exception("Image editing failed")
+        await reply_long(update, f"ছবিটি এডিট করা যায়নি: {exc}")
+    return True
+
+
+async def context_action_typing(update: Update) -> None:
+    try:
+        await update.get_bot().send_chat_action(
+            chat_id=update.effective_chat.id, action=ChatAction.UPLOAD_PHOTO
+        )
+    except Exception:
+        pass
+
+
+async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message or not await require_approved(update):
+        return
+    try:
+        photo = update.message.photo[-1]
+        tg_file = await photo.get_file()
+        buf = io.BytesIO()
+        await tg_file.download_to_memory(buf)
+        LAST_IMAGE_CONTEXT[update.effective_user.id] = buf.getvalue()
+        await update.message.reply_text(
+            "ছবিটি পেয়েছি। এখন কী পরিবর্তন করতে চান লিখুন—যেমন: ‘এই লাইনটা মাঝখানে সরাও’, ‘এই candle বাদ দাও’, ‘এখানে একটা trend line দাও’।"
+        )
+    except Exception:
+        logger.exception("Failed to store uploaded image")
+        await update.message.reply_text("ছবিটি গ্রহণ করা যায়নি। আবার পাঠান।")
+
+
 def format_trade_plan(plan: dict, side: str) -> str:
     if "entry" not in plan:
         return f"{side.upper()} SETUP: {plan.get('status', 'Unavailable')}"
@@ -1755,6 +1889,9 @@ async def process_text_query(update: Update, context: ContextTypes.DEFAULT_TYPE,
     if not text or not await require_approved(update):
         return
 
+    if await handle_image_edit_request(update, text):
+        return
+
     uid = update.effective_user.id
     text = text.strip()
     lang = detect_language(text)
@@ -1938,6 +2075,9 @@ async def process_text_query(update: Update, context: ContextTypes.DEFAULT_TYPE,
                 klines, coin_name, ta, snapshot, timeframe_label,
                 price_action, trade_plan, requested_trade_side
             )
+            chart_bytes = chart_buf.getvalue()
+            LAST_IMAGE_CONTEXT[uid] = chart_bytes
+            chart_buf.seek(0)
             await update.message.reply_photo(
                 photo=InputFile(chart_buf, filename="market_chart.png"),
             )
@@ -2338,6 +2478,7 @@ def build_application() -> Application:
     app=ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).post_init(configure_bot_commands).build()
     for name,fn in [("start",start_handler),("help",help_handler),("id",id_handler),("status",status_handler),("price",price_handler),("admin",admin_handler),("users",users_handler),("approved",approved_handler),("pending",pending_handler),("stats",stats_handler),("approve",approve_handler),("reject",reject_handler),("news",news_handler),("market",market_handler),("broadcast",broadcast_handler)]: app.add_handler(CommandHandler(name,fn))
     app.add_handler(CallbackQueryHandler(admin_callback_handler))
+    app.add_handler(MessageHandler(filters.PHOTO,photo_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND,message_handler)); app.add_handler(MessageHandler(filters.VOICE,voice_handler)); app.add_error_handler(error_handler); return app
 
 
